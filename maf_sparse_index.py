@@ -60,6 +60,7 @@ def maf_to_loci(path,ref):
     prefix = "s %s." % ref
     i = 0
     prev_i = 0
+    total = 0
     for maf_line in file(path):
         if maf_line.startswith(prefix):
             parts = re.split(r'\s+',maf_line)
@@ -70,7 +71,8 @@ def maf_to_loci(path,ref):
             maf_list.append( (start,end,prev_i) )
         prev_i = i
         i += len(maf_line)
-
+    if not total:
+        print "reference '%s' never occured in this MAF file. Are you sure you are doing this right?" % ref
     return maf_list,int(total)
 
 fname = sys.argv[1]
@@ -83,7 +85,7 @@ comb_fname = os.path.join(path,name.replace(".maf",".comb_idx"))
 bin_fname = os.path.join(path,name.replace(".maf",".comb_bin"))
 
 log.info("collecting maf-blocks from '%s' for reference '%s'" % (fname,ref))
-maf_list,chrom_size = maf_to_loci(fname,"dm6")
+maf_list,chrom_size = maf_to_loci(fname,ref)
 log.info("collected %d blocks." % len(maf_list) )
 
 log.info("writing combinations to '%s' and lookup to binary sparse file '%s'" % (comb_fname,bin_fname))
