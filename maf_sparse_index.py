@@ -98,6 +98,6 @@ for j,(combination,start,end) in enumerate(pileup_loci(maf_list)):
     comb_str = ",".join(["%x" % maf_line for start,end,maf_line in combination]) + '\n'
     comb.write(comb_str)
     
-    if j and not j % 1000:
+    if j and not j % 100000:
         perc = 100. * start / float(chrom_size)
         log.debug("%.2f %% of %s" % (perc,name))

@@ -27,6 +27,7 @@ class MAFCoverageCollector(object):
     """
     def __init__(self,ref,ref_start,ref_end,genome_provider):
         from collections import defaultdict
+        self.logger = logging.getLogger('MAFCoverageCollector')
         self.ref = ref
         self.ref_start = ref_start
         self.ref_end = ref_end
@@ -135,13 +136,13 @@ class MAFCoverageCollector(object):
         for species in self.species:
             if len(self.species_chroms[species]) > 1:
                 chrom_list = ','.join(sorted(self.species_chroms[species]))
-                warning('MAFCoverage is split across different contigs/chroms {chrom_list} in species {species}'.format(**locals()))
+                self.logger.warning('MAFCoverage is split across different contigs/chroms {chrom_list} in species {species}'.format(**locals()))
                 continue
             else:
                 chrom = list(self.species_chroms[species])[0]
                 
             if len(self.species_strands[species]) > 1:
-                warning('MAFCoverage is split across different strands in species {species}'.format(**locals()))
+                self.logger.warning('MAFCoverage is split across different strands in species {species}'.format(**locals()))
                 continue
             else:
                 strand = list(self.species_strands[species])[0]
@@ -161,12 +162,12 @@ class MAFCoverageCollector(object):
                     start += self.species_right_adjust[species]
 
             if end - start > ref_len*5:
-                warning('MAFCoverage is exceeding five times the reference sequence for {0}. skipping!'.format(species))
+                self.logger.warning('MAFCoverage is exceeding five times the reference sequence for {0}. skipping!'.format(species))
                 continue
 
             seq = genome.get_oriented(chrom,start,end,strand).upper()
             if genome.no_data:
-                warning("MAFCoverage skipping {species} due to missing genome".format(**locals()))
+                self.logger.warning("MAFCoverage skipping {species} due to missing genome".format(**locals()))
                 continue
             else:
                 if sense == '-':
