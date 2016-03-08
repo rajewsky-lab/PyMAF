@@ -5,7 +5,7 @@ from byo.io.genome_accessor import GenomeAccessor
 from byo.io.array_accessor import ArrayAccessor
 from byo.io import fasta_chunks
 import numpy as np
-from logging import *
+import logging
 
 class GenomeProvider(object):
     def __init__(self,path):
@@ -187,35 +187,42 @@ class MAFBlockMultiGenomeAccessor(ArrayAccessor):
     orthologous genomic sequences (with the help of MAFCoverageCollector).
     """
 
-    def __init__(self,path,chrom,sense,sense_specific=False,dtype=np.uint32,empty="",reference="",**kwargs):
+    def __init__(self,maf_path,chrom,sense,sense_specific=False,dtype=np.uint32,empty="",genome_path="",**kwargs):
 
-        debug("# MAFBlockMultiGenomeAccessor mmap: Loading '%s' annotation data for chromosome %s" % (str(dtype),chrom))
-        super(MAFBlockMultiGenomeAccessor,self).__init__(path,chrom,sense,dtype=dtype,sense_specific=False,ext=".comb_bin",**kwargs)
+        self.logger = logging.getLogger("MAFBlockMultiGenomeAccessor")
+        self.logger.debug("# MAFBlockMultiGenomeAccessor mmap: Loading '%s' lookup sparse-files and indices for chromosome %s" % (str(dtype),chrom))
+        super(MAFBlockMultiGenomeAccessor,self).__init__(maf_path,chrom,sense,dtype=dtype,sense_specific=False,ext=".comb_bin",**kwargs)
 
+        self.maf_path = maf_path
         self.empty = empty
-        self.reference = reference
-        if self.load_index(self.index_name(path,chrom,sense),empty):
-            self.maf_file = file(os.path.join(path,chrom+".maf"))
-        else:
-            self.maf_file = None
-        self.genome_provider = GenomeProvider(os.path.join(path,"genomes"))
+        self.reference = self.system
 
-    def index_name(self,path,chrom,sense):
-        return os.path.join(path,chrom+".comb_idx")
+        if not genome_path:
+            self.genome_path = os.path.join(path,'genomes')
+        else:
+            self.genome_path = genome_path
+
+        self.genome_provider = GenomeProvider(self.genome_path)        
+
+        index_file = os.path.join(self.maf_path,chrom+".comb_idx")
+        if self.load_index(index_file,empty):
+            self.maf_file = file(os.path.join(self.maf_path,chrom+".maf"))
+        else:
+            self.logger.warning("could not find MAF index file '{0}'".format(index_file) )
+            self.maf_file = None
+           
 
     def load_index(self,fname,empty):
-        
-
-        debug("# MAFBlockMultiGenomeAccessor: loading index from '%s'" % fname)
+        self.logger.debug("# MAFBlockMultiGenomeAccessor: loading index from '%s'" % fname)
         try:
             self.index = [empty] + [line.rstrip() for line in file(fname)]
         except IOError:
-            warning("Could not access '%s'. Switching to dummy mode (only empty)" % fname)
+            self.logger.warning("Could not access '%s'. Switching to dummy mode (only empty)" % fname)
             self.index = [empty]
             self.get_data = self.get_dummy
             return False
 
-        debug("# MAFBlockMultiGenomeAccessor: loaded %d feature combinations" % len(self.index))
+        self.logger.debug("# MAFBlockMultiGenomeAccessor: loaded %d feature combinations" % len(self.index))
         return True
 
     def get_data(self,chrom,start,end,sense):
@@ -403,17 +410,17 @@ class Alignment(object):
 
         return new
 
-if __name__ == '__main__':
-    MAF_track = Track('/data/rajewsky/genomes/24way_fly/maf/uncompressed/',MAFBlockMultiGenomeAccessor,sense_specific=False,system='dm6',reference='dm6')
-
+def process_ucsc(src,muscle=False,system=None,**kwargs):
     from byo.gene_model import transcripts_from_UCSC
     from byo.protein import find_ORF
 
-    for tx in transcripts_from_UCSC(sys.stdin,system='dm6'):
+    for tx in transcripts_from_UCSC(src,system=system):
         alignments = []
         for exon in tx.exons:
             mfa = MAF_track.get_oriented(exon.chrom,exon.start,exon.end,exon.sense)
-            aln = Alignment(run_through_MUSCLE(mfa))
+            if muscle:
+                mfa = run_through_MUSCLE(mfa)
+            aln = Alignment(mfa)
             alignments.append(aln)
 
         aln = alignments[0]
@@ -422,7 +429,7 @@ if __name__ == '__main__':
                 aln = aln + a
         
         n_cols = aln.n_cols
-        aln = aln + aln
+        #aln = aln + aln
 
         # double for circRNA
         aln.headers[0] += " from {tx.exon_count} exons of {tx.name} gene_name={tx.gene_id} n_cols = {n_cols}".format(**locals())
@@ -441,6 +448,64 @@ if __name__ == '__main__':
             for species in aln.species:
                 aln.highlight_ORF(orf_start,species)
                 
-        mfa = str(aln)
-        file('{tx.name}.muscle.fa'.format(**locals()),'w').write(mfa)
+        yield aln, tx.name
 
+def process_bed6(src,muscle=False,**kwargs):
+    from byo.io.bed import bed_importer
+    for bed in bed_importer(src):
+        mfa = MAF_track.get_oriented(bed.chrom,bed.start,bed.end,bed.strand)
+        if muscle:
+            mfa = run_through_MUSCLE(mfa)
+
+        aln = Alignment(mfa)
+        yield aln, bed.name
+        
+def not_implemented(*argc,**kwargs):
+    logging.error("INPUT FORMAT NOT IMPLEMENTED!")
+    sys.exit(1)
+
+if __name__ == '__main__':
+    logging.basicConfig(level=logging.DEBUG)
+    from optparse import *
+    usage = """
+    usage: %prog [options] <input_file.bed|gff|ucsc>
+    """
+
+    parser = OptionParser(usage=usage)
+    parser.add_option("-S","--system",dest="system",type=str,default=None,help="model system/reference species (hg19|dm6|...)")
+    parser.add_option("-M","--maf-path",dest="maf_path",type=str,default="",help="path to indexed MAF files (default='./')")
+    parser.add_option("-G","--genome-path",dest="genome_path",type=str,default="./",help="path to genomes (default='<maf-path>/genomes')")
+    parser.add_option("-o","--output-path",dest="output_path",type=str,default="./",help="path to write output files (default='./')")
+    parser.add_option("","--muscle",dest="muscle",default=False,action="store_true",help="activate re-alignment through MUSCLE. Warning, this can take a long time for large sequences! (default=Off)")
+    parser.add_option("-i","--input-format",dest="input_format",default="bed6",choices=["bed6","gff","bed12","ucsc"],help='which format does the input have? ["bed6","gff","bed12","ucsc"] default is bed6')
+    options,args = parser.parse_args()
+
+    MAF_track = Track(options.maf_path,MAFBlockMultiGenomeAccessor,sense_specific=False,genome_path=options.genome_path,system=options.system)
+
+    if not args:
+        src = sys.stdin
+    else:
+        src = file(args[0])
+    
+    handler = { 
+        'bed6' : process_bed6,
+        'bed12' : not_implemented,
+        'gff' : not_implemented,
+        'ucsc' : process_ucsc,
+    }[options.input_format]
+    
+    for aln,name in handler(src, muscle=options.muscle, system=options.system):
+        mfa = str(aln)
+        if options.muscle:
+            out_file = "{0}.muscle.fa".format(name)
+        else:
+            out_file = "{0}.fa".format(name)
+
+        if options.output_path == '-' or not options.output_path:
+            print mfa
+        else:
+            file(os.path.join(options.output_path,out_file),'w').write(mfa)
+
+
+
+    
