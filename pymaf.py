@@ -17,249 +17,6 @@ class GenomeProvider(object):
             self.cached[name] = Track(self.path,GenomeAccessor,system=name,split_chrom='.')
         return self.cached[name]
 
-
-class MAFCoverageCollector(object):
-    """
-    A helper class to aggregate the information from multiple MAF blocks
-    spanning a reference region. The main task is to keep track of the
-    start and end coordinates of the orthologous sequences in other
-    species.
-    """
-    def __init__(self,ref,ref_start,ref_end,genome_provider):
-        from collections import defaultdict
-        self.logger = logging.getLogger('MAFCoverageCollector')
-        self.ref = ref
-        self.ref_start = ref_start
-        self.ref_end = ref_end
-        self.genome_provider = genome_provider
-        self.left_col = None
-        self.right_col = None
-        self.species_min_max = {}
-        self.species_intervals = defaultdict(list)
-        self.species_strands = defaultdict(set)
-        self.species_chroms = defaultdict(set)
-        self.species_left_adjust = defaultdict(int)
-        self.species_right_adjust = defaultdict(int)
-        self.species = []
-        
-        self.ref_start_thisblock = None
-        self.ref_end_thisblock = None
-        
-    def add_MAF_line(self,maf_line):
-        """
-        this is used to feed data. Changes in MAF block are detected by change
-        in ref_start_thisblock. This requires that the reference species is
-        always passed first! Currently not checked, but silently assumed!!!
-        """
-        #print maf_line.rstrip()
-        if not maf_line.startswith('s'):
-            return
-
-        parts = re.split(r'\s+',maf_line)
-        loc,start,size,strand,total,seq = parts[1:7]
-        
-        species,chrom = loc.split('.')
-        start = int(start)
-        size = int(size)
-        total = int(total)
-        if strand == '+':
-            end = start + size
-        else:
-            start,end = total - (start + size),total - start
-            # if you think this is sick, go tell the evil master MAF and his
-            # sidekick Dr. minus, the inventor of the minus strand, to their 
-            # faces. ;)
-            
-        if species == self.ref:
-            # we are looking at the reference species!
-            self.ref_start_thisblock = start
-            self.ref_end_thisblock = end
-
-            if start <= self.ref_start:
-                # how many columns do we have to skip until we reach 
-                # the desired start position (gaps!)?
-                delta = self.ref_start - start
-                j = 0
-                while delta > 0:
-                    if seq[j] != '-':
-                        delta -= 1
-                    j += 1
-
-                self.left_col = j
-                #print "ref",self.left_col,seq[:self.left_col+1],seq[self.left_col:]
-
-            if end >= self.ref_end:
-                # same for the end, what column corresponds to ref_end?
-                delta = end - self.ref_end
-                j = len(seq)-1
-                while delta > 0:
-                    if seq[j] != '-':
-                        delta -= 1
-                    j -= 1
-                self.right_col = j+1
-        else:
-            # for other species, how many genomic positions do we need to skip 
-            # until we are at left_col?
-            if self.left_col != None and self.ref_start_thisblock <= self.ref_start:
-                # count non-gap positions before left_col/ref_start
-                self.species_left_adjust[species] = self.left_col - seq[:self.left_col].count('-')
-                
-            if self.right_col != None and self.ref_end_thisblock >= self.ref_end:
-                # count non-gap positions after the ref_end/right_col
-                self.species_right_adjust[species] = (len(seq)-self.right_col) - seq[self.right_col:].count('-') 
-                
-        # record the encountered species, their contigs and strands
-        if not species in self.species_strands:
-            self.species.append(species)
-
-        self.species_strands[species].add(strand)
-        self.species_chroms[species].add(chrom)
-        
-        # build a "maximal cover", the largest chunk of orthologous sequence
-        # according to the MAF blocks
-        if not species in self.species_min_max:
-            self.species_min_max[species] = (start,end)
-
-        S,E = self.species_min_max[species]
-        self.species_min_max[species] = (min(start,S),max(end,E))
-        self.species_intervals[species].append( (start,end) )
-
-
-    def get_sequences(self,sense):
-        """
-        This is a generator, yielding (species,chrom,start,end,strand,seq)
-        for as many species as it can. Actual genome access is deferred to
-        a GenomeProvider instance passed to the constructor.
-        """
-        ref_len = self.ref_end - self.ref_start
-
-        for species in self.species:
-            if len(self.species_chroms[species]) > 1:
-                chrom_list = ','.join(sorted(self.species_chroms[species]))
-                self.logger.warning('MAFCoverage is split across different contigs/chroms {chrom_list} in species {species}'.format(**locals()))
-                continue
-            else:
-                chrom = list(self.species_chroms[species])[0]
-                
-            if len(self.species_strands[species]) > 1:
-                self.logger.warning('MAFCoverage is split across different strands in species {species}'.format(**locals()))
-                continue
-            else:
-                strand = list(self.species_strands[species])[0]
-
-            start,end = self.species_min_max[species]
-            #print "getting",species,chrom,strand
-            genome = self.genome_provider[species]
-            if species == self.ref:
-                start,end = self.ref_start,self.ref_end
-            else:
-                if strand == '+':
-                    start += self.species_left_adjust[species]
-                    end -= self.species_right_adjust[species]
-                else:
-                    # Dr. minus strikes again...
-                    end -= self.species_left_adjust[species]
-                    start += self.species_right_adjust[species]
-
-            if end - start > ref_len*5:
-                self.logger.warning('MAFCoverage is exceeding five times the reference sequence for {0}. skipping!'.format(species))
-                continue
-
-            seq = genome.get_oriented(chrom,start,end,strand).upper()
-            if genome.no_data:
-                self.logger.warning("MAFCoverage skipping {species} due to missing genome".format(**locals()))
-                continue
-            else:
-                if sense == '-':
-                    # Dr. minus again. This time my own convention makes it 
-                    # even more weird. But it makes sense if you think about
-                    # it: get_data always preserves the order "left-to-right"
-                    # in chromosome logic. If you expect rev_comp, use
-                    # get_oriented() instead.
-                    seq = complement(seq)
-                yield species,chrom,start,end,strand,seq
-
-class MAFBlockMultiGenomeAccessor(ArrayAccessor):
-    """
-    This class uses an mmap'ed, sparse lookup table and an index to find
-    the MAF blocks overlapping the start and end of an arbitrary genomic
-    span in constant time. It then parses these MAF blocks, extracts the
-    orthologous coordinates for the aligned species and retrieves the
-    orthologous genomic sequences (with the help of MAFCoverageCollector).
-    """
-
-    def __init__(self,maf_path,chrom,sense,sense_specific=False,dtype=np.uint32,empty="",genome_path="",**kwargs):
-
-        self.logger = logging.getLogger("MAFBlockMultiGenomeAccessor")
-        self.logger.debug("# MAFBlockMultiGenomeAccessor mmap: Loading '%s' lookup sparse-files and indices for chromosome %s" % (str(dtype),chrom))
-        super(MAFBlockMultiGenomeAccessor,self).__init__(maf_path,chrom,sense,dtype=dtype,sense_specific=False,ext=".comb_bin",**kwargs)
-
-        self.maf_path = maf_path
-        self.empty = empty
-        self.reference = self.system
-
-        if not genome_path:
-            self.genome_path = os.path.join(path,'genomes')
-        else:
-            self.genome_path = genome_path
-
-        self.genome_provider = GenomeProvider(self.genome_path)        
-
-        index_file = os.path.join(self.maf_path,chrom+".comb_idx")
-        if self.load_index(index_file,empty):
-            self.maf_file = file(os.path.join(self.maf_path,chrom+".maf"))
-        else:
-            self.logger.warning("could not find MAF index file '{0}'".format(index_file) )
-            self.maf_file = None
-           
-
-    def load_index(self,fname,empty):
-        self.logger.debug("# MAFBlockMultiGenomeAccessor: loading index from '%s'" % fname)
-        try:
-            self.index = [empty] + [line.rstrip() for line in file(fname)]
-        except IOError:
-            self.logger.warning("Could not access '%s'. Switching to dummy mode (only empty)" % fname)
-            self.index = [empty]
-            self.get_data = self.get_dummy
-            return False
-
-        self.logger.debug("# MAFBlockMultiGenomeAccessor: loaded %d feature combinations" % len(self.index))
-        return True
-
-    def get_data(self,chrom,start,end,sense):
-        maf_starts = set()
-        comb_code_indices = [self.data[start],self.data[end]]
-        #comb_code_indices = self.data[start:end]
-        #print comb_code_indices
-        comb_codes = [self.index[i] for i in comb_code_indices if i]
-        #print comb_codes
-        for comb in set(comb_codes):
-            maf_starts |= set(comb.split(','))
-        #print maf_starts
-        coverage = MAFCoverageCollector(self.reference,start,end,self.genome_provider)
-        for m_start in sorted([int(m,16) for m in maf_starts]):
-            self.maf_file.seek(m_start)
-            for line in self.maf_file:
-                #print start,end,line.rstrip()
-                coverage.add_MAF_line(line)
-                if not line.strip():
-                    break
-                
-        return list(coverage.get_sequences(sense))
-
-    def get_oriented(self,chrom,start,end,sense):
-        res = self.get_data(chrom,start,end,sense)
-        if sense == '-':
-            # get_data returned already complement(seq). Only need to reverse.
-            res = [(species,chrom,start,end,strand,seq[::-1]) for species,chrom,start,end,strand,seq in res]
-
-        mfa = "\n".join([">{species} {chrom}:{start}-{end}{strand}\n{seq}".format(**locals()) for species,chrom,start,end,strand,seq in res])
-        return mfa
-    
-    def get_dummy(self,chrom,start,end,sense):
-        return []
-
-
 def run_through_MUSCLE(mfa,min_len=0):
     """
     Crazy little wrapper that builds a multiple species alignment with
@@ -411,17 +168,270 @@ class Alignment(object):
 
         return new
 
-def process_ucsc(src,muscle=False,system=None,**kwargs):
+
+class MAFCoverageCollector(object):
+    """
+    A helper class to aggregate the information from multiple MAF blocks
+    spanning a reference region. The main task is to keep track of the
+    start and end coordinates of the orthologous sequences in other
+    species.
+    """
+    def __init__(self,ref,ref_start,ref_end,genome_provider):
+        from collections import defaultdict
+        self.logger = logging.getLogger('pymaf.MAFCoverageCollector')
+        self.ref = ref
+        self.ref_start = ref_start
+        self.ref_end = ref_end
+        self.genome_provider = genome_provider
+        self.left_col = None
+        self.right_col = None
+        self.species_min_max = {}
+        self.species_intervals = defaultdict(list)
+        self.species_strands = defaultdict(set)
+        self.species_chroms = defaultdict(set)
+        self.species_left_adjust = defaultdict(int)
+        self.species_right_adjust = defaultdict(int)
+        self.species = []
+        
+        self.ref_start_thisblock = None
+        self.ref_end_thisblock = None
+        
+    def add_MAF_line(self,maf_line):
+        """
+        this is used to feed data. Changes in MAF block are detected by change
+        in ref_start_thisblock. This requires that the reference species is
+        always passed first! Currently not checked, but silently assumed!!!
+        """
+        #print maf_line.rstrip()
+        if not maf_line.startswith('s'):
+            return
+
+        parts = re.split(r'\s+',maf_line)
+        loc,start,size,strand,total,seq = parts[1:7]
+        
+        species,chrom = loc.split('.',1)
+        start = int(start)
+        size = int(size)
+        total = int(total)
+        if strand == '+':
+            end = start + size
+        else:
+            start,end = total - (start + size),total - start
+            # if you think this is sick, go tell the evil master MAF and his
+            # sidekick Dr. minus, the inventor of the minus strand, to their 
+            # faces. ;)
+            
+        if species == self.ref:
+            # we are looking at the reference species!
+            self.ref_start_thisblock = start
+            self.ref_end_thisblock = end
+
+            if start <= self.ref_start:
+                # how many columns do we have to skip until we reach 
+                # the desired start position (gaps!)?
+                delta = self.ref_start - start
+                j = 0
+                while delta > 0:
+                    if seq[j] != '-':
+                        delta -= 1
+                    j += 1
+
+                self.left_col = j
+                #print "ref",self.left_col,seq[:self.left_col+1],seq[self.left_col:]
+
+            if end >= self.ref_end:
+                # same for the end, what column corresponds to ref_end?
+                delta = end - self.ref_end
+                j = len(seq)-1
+                while delta > 0:
+                    if seq[j] != '-':
+                        delta -= 1
+                    j -= 1
+                self.right_col = j+1
+        else:
+            # for other species, how many genomic positions do we need to skip 
+            # until we are at left_col?
+            if self.left_col != None and self.ref_start_thisblock <= self.ref_start:
+                # count non-gap positions before left_col/ref_start
+                self.species_left_adjust[species] = self.left_col - seq[:self.left_col].count('-')
+                
+            if self.right_col != None and self.ref_end_thisblock >= self.ref_end:
+                # count non-gap positions after the ref_end/right_col
+                self.species_right_adjust[species] = (len(seq)-self.right_col) - seq[self.right_col:].count('-') 
+                
+        # record the encountered species, their contigs and strands
+        if not species in self.species_strands:
+            self.species.append(species)
+
+        self.species_strands[species].add(strand)
+        self.species_chroms[species].add(chrom)
+        
+        # build a "maximal cover", the largest chunk of orthologous sequence
+        # according to the MAF blocks
+        if not species in self.species_min_max:
+            self.species_min_max[species] = (start,end)
+
+        S,E = self.species_min_max[species]
+        self.species_min_max[species] = (min(start,S),max(end,E))
+        self.species_intervals[species].append( (start,end) )
+
+
+    def get_sequences(self,sense):
+        """
+        This is a generator, yielding (species,chrom,start,end,strand,seq)
+        for as many species as it can. Actual genome access is deferred to
+        a GenomeProvider instance passed to the constructor.
+        """
+        ref_len = self.ref_end - self.ref_start
+
+        for species in self.species:
+            if len(self.species_chroms[species]) > 1:
+                chrom_list = ','.join(sorted(self.species_chroms[species]))
+                self.logger.warning('sequence is split across different contigs/chroms {chrom_list} in species {species}'.format(**locals()))
+                continue
+            else:
+                chrom = list(self.species_chroms[species])[0]
+                
+            if len(self.species_strands[species]) > 1:
+                self.logger.warning('sequence is split across different strands in species {species}'.format(**locals()))
+                continue
+            else:
+                strand = list(self.species_strands[species])[0]
+
+            start,end = self.species_min_max[species]
+            #print "getting",species,chrom,strand
+            genome = self.genome_provider[species]
+            if species == self.ref:
+                start,end = self.ref_start,self.ref_end
+            else:
+                if strand == '+':
+                    start += self.species_left_adjust[species]
+                    end -= self.species_right_adjust[species]
+                else:
+                    # Dr. minus strikes again...
+                    end -= self.species_left_adjust[species]
+                    start += self.species_right_adjust[species]
+
+            if end - start > ref_len*5:
+                self.logger.warning('homologous sequence exceeds five times the reference sequence for {0}. skipping!'.format(species))
+                continue
+
+            seq = genome.get_oriented(chrom.split('.')[0],start,end,strand).upper()
+            if genome.no_data:
+                self.logger.warning("skipping {species} due to missing genome".format(**locals()))
+                continue
+            else:
+                if sense == '-':
+                    # Dr. minus again. This time my own convention makes it 
+                    # even more weird. But it makes sense if you think about
+                    # it: get_data always preserves the order "left-to-right"
+                    # in chromosome logic. If you expect rev_comp, use
+                    # get_oriented() instead.
+                    seq = complement(seq)
+                yield species,chrom,start,end,strand,seq
+
+class MAFBlockMultiGenomeAccessor(ArrayAccessor):
+    """
+    This class uses an mmap'ed, sparse lookup table and an index to find
+    the MAF blocks overlapping the start and end of an arbitrary genomic
+    span in constant time. It then parses these MAF blocks, extracts the
+    orthologous coordinates for the aligned species and retrieves the
+    orthologous genomic sequences (with the help of MAFCoverageCollector).
+    """
+
+    def __init__(self,maf_path,chrom,sense,sense_specific=False,dtype=np.uint32,empty="",genome_path="",muscle=False,aln_class=Alignment,**kwargs):
+        super(MAFBlockMultiGenomeAccessor,self).__init__(maf_path,chrom,sense,dtype=dtype,sense_specific=False,ext=".comb_bin",**kwargs)
+        self.logger = logging.getLogger("pymaf.MAFBlockMultiGenomeAccessor")
+        self.logger.debug("mmap'ing '%s' lookup sparse-files and indices for chromosome %s" % (str(dtype),chrom))
+
+        self.maf_path = maf_path
+        self.empty = empty
+        self.reference = self.system
+        self.aln_class = aln_class
+        self.muscle = muscle
+
+        if not genome_path:
+            self.genome_path = os.path.join(path,'genomes')
+        else:
+            self.genome_path = genome_path
+
+        self.genome_provider = GenomeProvider(self.genome_path)        
+
+        index_file = os.path.join(self.maf_path,chrom+".comb_idx")
+        if self.load_index(index_file,empty):
+            self.maf_file = file(os.path.join(self.maf_path,chrom+".maf"))
+        else:
+            self.logger.warning("could not find MAF index file '{0}'".format(index_file) )
+            self.maf_file = None
+           
+
+    def load_index(self,fname,empty):
+        self.logger.debug("loading index from '%s'" % fname)
+        try:
+            self.index = [empty] + [line.rstrip() for line in file(fname)]
+        except IOError:
+            self.logger.warning("Could not access '%s'. Switching to dummy mode (only empty)" % fname)
+            self.index = [empty]
+            self.get_data = self.get_dummy
+            return False
+
+        self.logger.debug("loaded %d feature combinations" % len(self.index))
+        return True
+
+    def get_data(self,chrom,start,end,sense):
+        maf_starts = set()
+        comb_code_indices = [self.data[start],self.data[end]]
+        #comb_code_indices = self.data[start:end]
+        #print comb_code_indices
+        comb_codes = [self.index[i] for i in comb_code_indices if i]
+        #print comb_codes
+        for comb in set(comb_codes):
+            maf_starts |= set(comb.split(','))
+        #print maf_starts
+        coverage = MAFCoverageCollector(self.reference,start,end,self.genome_provider)
+        for m_start in sorted([int(m,16) for m in maf_starts]):
+            self.maf_file.seek(m_start)
+            for line in self.maf_file:
+                #print start,end,line.rstrip()
+                try:
+                    coverage.add_MAF_line(line)
+                except:
+                    import traceback
+                    self.logger.error("unhandled exception while parsing MAF-line '{0}'".format(line.rstrip()))
+                    exc = traceback.format_exc()
+                    logging.error(exc)
+
+                if not line.strip():
+                    break
+                
+        return list(coverage.get_sequences(sense))
+
+    def get_oriented(self,chrom,start,end,sense):
+        res = self.get_data(chrom,start,end,sense)
+        if sense == '-':
+            # get_data returned already complement(seq). Only need to reverse.
+            res = [(species,chrom,start,end,strand,seq[::-1]) for species,chrom,start,end,strand,seq in res]
+
+        mfa = "\n".join([">{species} {chrom}:{start}-{end}{strand}\n{seq}".format(**locals()) for species,chrom,start,end,strand,seq in res])
+        if self.muscle:
+            mfa = run_through_MUSCLE(mfa)
+            
+        aln = self.aln_class(mfa)
+        return aln
+    
+    def get_dummy(self,chrom,start,end,sense):
+        return []
+
+
+
+def process_ucsc(src,system=None,**kwargs):
     from byo.gene_model import transcripts_from_UCSC
     from byo.protein import find_ORF
 
     for tx in transcripts_from_UCSC(src,system=system):
         alignments = []
         for exon in tx.exons:
-            mfa = MAF_track.get_oriented(exon.chrom,exon.start,exon.end,exon.sense)
-            if muscle:
-                mfa = run_through_MUSCLE(mfa)
-            aln = Alignment(mfa)
+            aln = MAF_track.get_oriented(exon.chrom,exon.start,exon.end,exon.sense)
             alignments.append(aln)
 
         aln = alignments[0]
@@ -451,14 +461,12 @@ def process_ucsc(src,muscle=False,system=None,**kwargs):
                 
         yield aln, tx.name
 
-def process_bed6(src,muscle=False,**kwargs):
+def process_bed6(src,**kwargs):
     from byo.io.bed import bed_importer
     for bed in bed_importer(src):
-        mfa = MAF_track.get_oriented(bed.chrom,bed.start,bed.end,bed.strand)
-        if muscle:
-            mfa = run_through_MUSCLE(mfa)
-
-        aln = Alignment(mfa)
+        if options.debug:
+            print "# investigating",bed
+        aln = MAF_track.get_oriented(bed.chrom,bed.start,bed.end,bed.strand)
         yield aln, bed.name
         
 def not_implemented(*argc,**kwargs):
@@ -466,7 +474,6 @@ def not_implemented(*argc,**kwargs):
     sys.exit(1)
 
 if __name__ == '__main__':
-    logging.basicConfig(level=logging.DEBUG)
     from optparse import *
     usage = """
     usage: %prog [options] <input_file.bed|gff|ucsc>
@@ -476,12 +483,18 @@ if __name__ == '__main__':
     parser.add_option("-S","--system",dest="system",type=str,default=None,help="model system/reference species (hg19|dm6|...)")
     parser.add_option("-M","--maf-path",dest="maf_path",type=str,default="",help="path to indexed MAF files (default='./')")
     parser.add_option("-G","--genome-path",dest="genome_path",type=str,default="./",help="path to genomes (default='<maf-path>/genomes')")
-    parser.add_option("-o","--output-path",dest="output_path",type=str,default="./",help="path to write output files (default='./')")
+    parser.add_option("-o","--output-path",dest="output_path",type=str,default="./",help="path to write output files to. if you pass '-', it prints on stdout instead (default='./')")
     parser.add_option("","--muscle",dest="muscle",default=False,action="store_true",help="activate re-alignment through MUSCLE. Warning, this can take a long time for large sequences! (default=Off)")
+    parser.add_option("","--debug",dest="debug",default=False,action="store_true",help="activate extensive debug output (default=Off)")
     parser.add_option("-i","--input-format",dest="input_format",default="bed6",choices=["bed6","gff","bed12","ucsc"],help='which format does the input have? ["bed6","gff","bed12","ucsc"] default is bed6')
     options,args = parser.parse_args()
 
-    MAF_track = Track(options.maf_path,MAFBlockMultiGenomeAccessor,sense_specific=False,genome_path=options.genome_path,system=options.system)
+    if options.debug:
+        logging.basicConfig(level=logging.DEBUG)
+    else:
+        logging.basicConfig(level=logging.WARNING)
+
+    MAF_track = Track(options.maf_path,MAFBlockMultiGenomeAccessor,sense_specific=False,genome_path=options.genome_path,muscle=options.muscle,system=options.system)
 
     if not args:
         src = sys.stdin
@@ -497,10 +510,7 @@ if __name__ == '__main__':
     
     for aln,name in handler(src, muscle=options.muscle, system=options.system):
         mfa = str(aln)
-        if options.muscle:
-            out_file = "{0}.muscle.fa".format(name)
-        else:
-            out_file = "{0}.fa".format(name)
+        out_file = "{0}.fa".format(name)
 
         if options.output_path == '-' or not options.output_path:
             print mfa
