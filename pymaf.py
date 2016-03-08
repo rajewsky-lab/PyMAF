@@ -11,10 +11,15 @@ class GenomeProvider(object):
     def __init__(self,path):
         self.cached = {}
         self.path = path
+        self.logger = logging.getLogger("pymaf.GenomeProvider")
 
     def __getitem__(self,name):
         if not name in self.cached:
+            logging.info("{0} not in genome cache".format(name))
             self.cached[name] = Track(self.path,GenomeAccessor,system=name,split_chrom='.')
+        else:
+            logging.info("genome cache hit! {0}".format(name))
+
         return self.cached[name]
 
 def run_through_MUSCLE(mfa,min_len=0):
@@ -135,7 +140,7 @@ class Alignment(object):
     def __str__(self):
         buf = []
         for species,header in zip(self.species,self.headers):
-            buf.append("> {header}".format(**locals()))
+            buf.append(">{header}".format(**locals()))
             row = list(self.by_species[species])
             for i,spc in enumerate(self.spacers):
                 row.insert(spc+i,'|')
@@ -339,7 +344,7 @@ class MAFBlockMultiGenomeAccessor(ArrayAccessor):
     orthologous genomic sequences (with the help of MAFCoverageCollector).
     """
 
-    def __init__(self,maf_path,chrom,sense,sense_specific=False,dtype=np.uint32,empty="",genome_path="",muscle=False,aln_class=Alignment,**kwargs):
+    def __init__(self,maf_path,chrom,sense,sense_specific=False,dtype=np.uint32,empty="",genome_provider=None,muscle=False,aln_class=Alignment,**kwargs):
         super(MAFBlockMultiGenomeAccessor,self).__init__(maf_path,chrom,sense,dtype=dtype,sense_specific=False,ext=".comb_bin",**kwargs)
         self.logger = logging.getLogger("pymaf.MAFBlockMultiGenomeAccessor")
         self.logger.debug("mmap'ing '%s' lookup sparse-files and indices for chromosome %s" % (str(dtype),chrom))
@@ -349,13 +354,7 @@ class MAFBlockMultiGenomeAccessor(ArrayAccessor):
         self.reference = self.system
         self.aln_class = aln_class
         self.muscle = muscle
-
-        if not genome_path:
-            self.genome_path = os.path.join(path,'genomes')
-        else:
-            self.genome_path = genome_path
-
-        self.genome_provider = GenomeProvider(self.genome_path)        
+        self.genome_provider = genome_provider        
 
         index_file = os.path.join(self.maf_path,chrom+".comb_idx")
         if self.load_index(index_file,empty):
@@ -463,9 +462,9 @@ def process_ucsc(src,system=None,**kwargs):
 
 def process_bed6(src,**kwargs):
     from byo.io.bed import bed_importer
+    logging.info('process_bed6()')
     for bed in bed_importer(src):
-        if options.debug:
-            print "# investigating",bed
+        logging.info("...retrieving sequences for {bed.name} {bed.chrom}:{bed.start}-{bed.end}:{bed.strand}".format(bed=bed))
         aln = MAF_track.get_oriented(bed.chrom,bed.start,bed.end,bed.strand)
         yield aln, bed.name
         
@@ -489,12 +488,27 @@ if __name__ == '__main__':
     parser.add_option("-i","--input-format",dest="input_format",default="bed6",choices=["bed6","gff","bed12","ucsc"],help='which format does the input have? ["bed6","gff","bed12","ucsc"] default is bed6')
     options,args = parser.parse_args()
 
+    # prepare logging system
+    FORMAT = '%(asctime)-20s\t%(levelname)s\t%(name)s\t%(message)s'
     if options.debug:
-        logging.basicConfig(level=logging.DEBUG)
+        logging.basicConfig(level=logging.DEBUG,format=FORMAT)
     else:
-        logging.basicConfig(level=logging.WARNING)
+        logging.basicConfig(level=logging.INFO,format=FORMAT)
 
-    MAF_track = Track(options.maf_path,MAFBlockMultiGenomeAccessor,sense_specific=False,genome_path=options.genome_path,muscle=options.muscle,system=options.system)
+    if not options.genome_path:
+        genome_path = os.path.join(options.maf_path,'genomes')
+    else:
+        genome_path = options.genome_path
+
+    genome_provider = GenomeProvider(genome_path)
+    MAF_track = Track(
+        options.maf_path,
+        MAFBlockMultiGenomeAccessor,
+        sense_specific=False,
+        genome_provider=genome_provider,
+        muscle=options.muscle,
+        system=options.system
+    )
 
     if not args:
         src = sys.stdin
@@ -510,13 +524,12 @@ if __name__ == '__main__':
     
     for aln,name in handler(src, muscle=options.muscle, system=options.system):
         mfa = str(aln)
-        out_file = "{0}.fa".format(name)
 
         if options.output_path == '-' or not options.output_path:
             print mfa
         else:
-            file(os.path.join(options.output_path,out_file),'w').write(mfa)
-
-
+            out_file = os.path.join(options.output_path, "{0}.fa".format(name))
+            logging.info("storing {name} in {out_file}".format(name=name, out_file=out_file))
+            file(out_file,'w').write(mfa)
 
     
