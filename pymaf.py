@@ -15,10 +15,10 @@ class GenomeProvider(object):
 
     def __getitem__(self,name):
         if not name in self.cached:
-            logging.info("{0} not in genome cache".format(name))
+            logging.debug("{0} not in genome cache".format(name))
             self.cached[name] = Track(self.path,GenomeAccessor,system=name,split_chrom='.')
         else:
-            logging.info("genome cache hit! {0}".format(name))
+            logging.debug("genome cache hit! {0}".format(name))
 
         return self.cached[name]
 
