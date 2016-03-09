@@ -22,31 +22,10 @@ class GenomeProvider(object):
 
         return self.cached[name]
 
-def run_through_MUSCLE(mfa,min_len=0):
-    """
-    Crazy little wrapper that builds a multiple species alignment with
-    MUSCLE (Edgar, R.C. Nucleic Acids Res 32(5), 1792-97).
-    """
-
-    from subprocess import Popen,PIPE
-    # keep correct order for later
-    ordered_species = [fa_id for fa_id,seq in fasta_chunks(mfa.split('\n')) if len(seq) > min_len]
-    if not ordered_species:
-        return ""
-    # pipe through MUSCLE
-    muscle = Popen(['muscle','-quiet','-in','/dev/stdin'],stdin=PIPE,stdout=PIPE)
-    stdout,stderr = muscle.communicate(mfa)
-
-    # sanitize output and re-order
-    unordered = {}
-    for fa_id,seq in fasta_chunks(stdout.split('\n')):
-        unordered[fa_id] = seq
-
-    return "\n".join([">%s\n%s" % (species,unordered[species]) for species in ordered_species])
-    
     
 class Alignment(object):
     def __init__(self,mfa,ref=None):
+        self.logger = logging.getLogger('pymaf.Alignment')
         self.nogaps = {}
         self.by_species = {}
         self.species = []
@@ -137,6 +116,31 @@ class Alignment(object):
             orf_i += 3
             codon = self.nogaps[species][spc_start + orf_i:spc_start + orf_i + 3]
 
+    def MUSCLE(self):
+        """
+        Crazy little wrapper that builds a full multiple species alignment with
+        MUSCLE (Edgar, R.C. Nucleic Acids Res 32(5), 1792-97).
+        """
+
+        from subprocess import Popen,PIPE
+        # keep correct order for later
+        if not self.species:
+            return ""
+        
+        # pipe through MUSCLE
+        muscle = Popen(['muscle','-quiet','-in','/dev/stdin'],stdin=PIPE,stdout=PIPE)
+        mfa = "\n".join(['>{spc}\n{seq}'.format(spc=spc, seq=self.nogaps[spc]) for spc in self.species])
+        self.logger.info('passing {size:.2f}kb of sequence ({n} species) through MUSCLE'.format(n=len(self.species),size=len(mfa)/1000.) )
+        stdout,stderr = muscle.communicate(mfa)
+
+        # sanitize output and re-order
+        unordered = {}
+        for fa_id,seq in fasta_chunks(stdout.split('\n')):
+            unordered[fa_id] = seq
+        
+        return Alignment("\n".join([">%s\n%s" % (species,unordered[species]) for species in self.species]))
+        
+
     def __str__(self):
         buf = []
         for species,header in zip(self.species,self.headers):
@@ -181,9 +185,11 @@ class MAFCoverageCollector(object):
     start and end coordinates of the orthologous sequences in other
     species.
     """
-    def __init__(self,ref,ref_start,ref_end,genome_provider):
+    def __init__(self, ref, ref_start, ref_end, genome_provider, excess_threshold=5, min_len=3):
         from collections import defaultdict
         self.logger = logging.getLogger('pymaf.MAFCoverageCollector')
+        self.excess_threshold = excess_threshold
+        self.min_len = min_len
         self.ref = ref
         self.ref_start = ref_start
         self.ref_end = ref_end
@@ -317,10 +323,14 @@ class MAFCoverageCollector(object):
                     end -= self.species_left_adjust[species]
                     start += self.species_right_adjust[species]
 
-            if end - start > ref_len*5:
-                self.logger.warning('homologous sequence exceeds five times the reference sequence for {0}. skipping!'.format(species))
+            if end - start > ref_len* self.excess_threshold:
+                self.logger.warning('homologous sequence exceeds {0} times the reference sequence for {1}. skipping!'.format(self.excess_threshold, species))
                 continue
 
+            if end - start < self.min_len:
+                self.logger.warning('skipping homologous sequence of length {0} < min_len of {1} for {2}!'.format(end-start, self.min_len, species))
+                continue
+                
             seq = genome.get_oriented(chrom.split('.')[0],start,end,strand).upper()
             if genome.no_data:
                 self.logger.warning("skipping {species} due to missing genome".format(**locals()))
@@ -333,6 +343,7 @@ class MAFCoverageCollector(object):
                     # in chromosome logic. If you expect rev_comp, use
                     # get_oriented() instead.
                     seq = complement(seq)
+
                 yield species,chrom,start,end,strand,seq
 
 class MAFBlockMultiGenomeAccessor(ArrayAccessor):
@@ -344,7 +355,7 @@ class MAFBlockMultiGenomeAccessor(ArrayAccessor):
     orthologous genomic sequences (with the help of MAFCoverageCollector).
     """
 
-    def __init__(self,maf_path,chrom,sense,sense_specific=False,dtype=np.uint32,empty="",genome_provider=None,muscle=False,aln_class=Alignment,**kwargs):
+    def __init__(self,maf_path,chrom,sense,sense_specific=False,dtype=np.uint32,empty="",genome_provider=None,excess_threshold=5.,min_len=0,aln_class=Alignment,**kwargs):
         super(MAFBlockMultiGenomeAccessor,self).__init__(maf_path,chrom,sense,dtype=dtype,sense_specific=False,ext=".comb_bin",**kwargs)
         self.logger = logging.getLogger("pymaf.MAFBlockMultiGenomeAccessor")
         self.logger.debug("mmap'ing '%s' lookup sparse-files and indices for chromosome %s" % (str(dtype),chrom))
@@ -353,8 +364,9 @@ class MAFBlockMultiGenomeAccessor(ArrayAccessor):
         self.empty = empty
         self.reference = self.system
         self.aln_class = aln_class
-        self.muscle = muscle
-        self.genome_provider = genome_provider        
+        self.genome_provider = genome_provider
+        self.excess_threshold = excess_threshold
+        self.min_len = min_len
 
         index_file = os.path.join(self.maf_path,chrom+".comb_idx")
         if self.load_index(index_file,empty):
@@ -387,7 +399,7 @@ class MAFBlockMultiGenomeAccessor(ArrayAccessor):
         for comb in set(comb_codes):
             maf_starts |= set(comb.split(','))
         #print maf_starts
-        coverage = MAFCoverageCollector(self.reference,start,end,self.genome_provider)
+        coverage = MAFCoverageCollector(self.reference,start,end,self.genome_provider, excess_threshold=self.excess_threshold, min_len=self.min_len )
         for m_start in sorted([int(m,16) for m in maf_starts]):
             self.maf_file.seek(m_start)
             for line in self.maf_file:
@@ -412,9 +424,6 @@ class MAFBlockMultiGenomeAccessor(ArrayAccessor):
             res = [(species,chrom,start,end,strand,seq[::-1]) for species,chrom,start,end,strand,seq in res]
 
         mfa = "\n".join([">{species} {chrom}:{start}-{end}{strand}\n{seq}".format(**locals()) for species,chrom,start,end,strand,seq in res])
-        if self.muscle:
-            mfa = run_through_MUSCLE(mfa)
-            
         aln = self.aln_class(mfa)
         return aln
     
@@ -423,54 +432,62 @@ class MAFBlockMultiGenomeAccessor(ArrayAccessor):
 
 
 
-def process_ucsc(src,system=None,**kwargs):
+def process_ucsc(src,system=None,segments=["UTR5","CDS","UTR3"],**kwargs):
     from byo.gene_model import transcripts_from_UCSC
     from byo.protein import find_ORF
+    logger = logging.getLogger('pymaf.process_ucsc')
 
     for tx in transcripts_from_UCSC(src,system=system):
-        alignments = []
-        for exon in tx.exons:
-            aln = MAF_track.get_oriented(exon.chrom,exon.start,exon.end,exon.sense)
-            alignments.append(aln)
-
-        aln = alignments[0]
-        if len(alignments) > 1:
-            for a in alignments[1:]:
-                aln = aln + a
-        
-        n_cols = aln.n_cols
-        #aln = aln + aln
-
-        # double for circRNA
-        aln.headers[0] += " from {tx.exon_count} exons of {tx.name} gene_name={tx.gene_id} n_cols = {n_cols}".format(**locals())
-        #cds_start,cds_ens = tx.map_block_to_spliced(tx.CDS.start,tx.CDS.end)
-        
-        cds_start,cds_end = tx.map_block_to_spliced(tx.CDS.start,tx.CDS.end)
-        ref_seq = aln.nogaps[aln.ref]
-        if ref_seq[cds_start+1:cds_start+3].upper() == 'TG':
-            # proper start-codon found?
-            orf_start = cds_start
+        if segments:
+            chains = [getattr(tx,seg,None) for seg in segments if getattr(tx,seg,None)]
         else:
-            # de novo search for longest ORF
-            aa,orf_start,orf_end = find_ORF(ref_seq,len_thresh=10)
+            chains = [tx]
 
-        if orf_start >= 0:
-            for species in aln.species:
-                aln.highlight_ORF(orf_start,species)
-                
-        yield aln, tx.name
+        for chain in chains:
+            logger.info("...retrieving sequences for {chain.name} {chain.chrom}:{chain.start}-{chain.end}:{chain.sense}".format(chain=chain))
+            
+            alignments = []
+            for exon in chain.exons:
+                aln = MAF_track.get_oriented(exon.chrom,exon.start,exon.end,exon.sense)
+                alignments.append(aln)
+
+            aln = alignments[0]
+            if len(alignments) > 1:
+                for a in alignments[1:]:
+                    aln = aln + a
+
+            # double for circRNA
+            aln.headers[0] += " from {chain.exon_count} exons of {chain.name} gene_name={chain.gene_id} n_cols = {aln.n_cols}".format(**locals())
+            #cds_start,cds_ens = chain.map_block_to_spliced(chain.CDS.start,chain.CDS.end)
+            
+            #cds_start,cds_end = chain.map_block_to_spliced(chain.CDS.start,chain.CDS.end)
+            #ref_seq = aln.nogaps[aln.ref]
+            #if ref_seq[cds_start+1:cds_start+3].upper() == 'TG':
+                ## proper start-codon found?
+                #orf_start = cds_start
+            #else:
+                ## de novo search for longest ORF
+                #aa,orf_start,orf_end = find_ORF(ref_seq,len_thresh=10)
+
+            #if orf_start >= 0:
+                #for species in aln.species:
+                    #aln.highlight_ORF(orf_start,species)
+                    
+            yield aln, chain.name
 
 def process_bed6(src,**kwargs):
     from byo.io.bed import bed_importer
-    logging.info('process_bed6()')
+    logger = logging.getLogger('pymaf.process_bed6')
     for bed in bed_importer(src):
-        logging.info("...retrieving sequences for {bed.name} {bed.chrom}:{bed.start}-{bed.end}:{bed.strand}".format(bed=bed))
+        logger.info("...retrieving sequences for {bed.name} {bed.chrom}:{bed.start}-{bed.end}:{bed.strand}".format(bed=bed))
         aln = MAF_track.get_oriented(bed.chrom,bed.start,bed.end,bed.strand)
         yield aln, bed.name
         
+
 def not_implemented(*argc,**kwargs):
     logging.error("INPUT FORMAT NOT IMPLEMENTED!")
     sys.exit(1)
+
 
 if __name__ == '__main__':
     from optparse import *
@@ -483,18 +500,22 @@ if __name__ == '__main__':
     parser.add_option("-M","--maf-path",dest="maf_path",type=str,default="",help="path to indexed MAF files (default='./')")
     parser.add_option("-G","--genome-path",dest="genome_path",type=str,default="./",help="path to genomes (default='<maf-path>/genomes')")
     parser.add_option("-o","--output-path",dest="output_path",type=str,default="./",help="path to write output files to. if you pass '-', it prints on stdout instead (default='./')")
+    parser.add_option("","--min-len",dest="min_len",type=int,default=1,help="minimum length of sequence to be included in the alignment (default=1)")
+    parser.add_option("","--excess-threshold",dest="excess_threshold",type=float,default=5,help="sequences are excluded from the alignemnt if they exceed <threshold> fold the length of the reference (default=5)")
+    parser.add_option("","--segments",dest="segments",default="UTR5,CDS,UTR3",help="which transcript segments (for BED12 or UCSC input) to scan (default=UTR5,CDS,UTR3). set to '' for whole transcript.")
     parser.add_option("","--muscle",dest="muscle",default=False,action="store_true",help="activate re-alignment through MUSCLE. Warning, this can take a long time for large sequences! (default=Off)")
     parser.add_option("","--debug",dest="debug",default=False,action="store_true",help="activate extensive debug output (default=Off)")
     parser.add_option("-i","--input-format",dest="input_format",default="bed6",choices=["bed6","gff","bed12","ucsc"],help='which format does the input have? ["bed6","gff","bed12","ucsc"] default is bed6')
     options,args = parser.parse_args()
 
     # prepare logging system
-    FORMAT = '%(asctime)-20s\t%(levelname)s\t%(name)s\t%(message)s'
+    FORMAT = '%(asctime)-20s\t%(levelname)s\t%(name)-25s\t%(message)s'
     if options.debug:
         logging.basicConfig(level=logging.DEBUG,format=FORMAT)
     else:
         logging.basicConfig(level=logging.INFO,format=FORMAT)
-
+    logger = logging.getLogger('pymaf.main()')
+    
     if not options.genome_path:
         genome_path = os.path.join(options.maf_path,'genomes')
     else:
@@ -506,7 +527,8 @@ if __name__ == '__main__':
         MAFBlockMultiGenomeAccessor,
         sense_specific=False,
         genome_provider=genome_provider,
-        muscle=options.muscle,
+        excess_threshold=options.excess_threshold,
+        min_len=options.min_len,
         system=options.system
     )
 
@@ -515,6 +537,12 @@ if __name__ == '__main__':
     else:
         src = file(args[0])
     
+    if options.output_path and options.output_path != '-':
+        # prepare output directory
+        if not os.path.isdir(options.output_path):
+            os.makedirs(options.output_path)
+        
+        
     handler = { 
         'bed6' : process_bed6,
         'bed12' : not_implemented,
@@ -522,14 +550,17 @@ if __name__ == '__main__':
         'ucsc' : process_ucsc,
     }[options.input_format]
     
-    for aln,name in handler(src, muscle=options.muscle, system=options.system):
-        mfa = str(aln)
+    for aln,name in handler(src, muscle=options.muscle, system=options.system, segments=options.segments.split(',')):
+        if options.muscle:
+            mfa = str(aln.MUSCLE())
+        else:
+            mfa = str(aln)
 
         if options.output_path == '-' or not options.output_path:
             print mfa
         else:
             out_file = os.path.join(options.output_path, "{0}.fa".format(name))
-            logging.info("storing {name} in {out_file}".format(name=name, out_file=out_file))
+            logger.info("storing {name} in {out_file}".format(name=name, out_file=out_file))
             file(out_file,'w').write(mfa)
 
     
