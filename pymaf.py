@@ -116,7 +116,7 @@ class Alignment(object):
             orf_i += 3
             codon = self.nogaps[species][spc_start + orf_i:spc_start + orf_i + 3]
 
-    def MUSCLE(self):
+    def MUSCLE(self,n_iter=16):
         """
         Crazy little wrapper that builds a full multiple species alignment with
         MUSCLE (Edgar, R.C. Nucleic Acids Res 32(5), 1792-97).
@@ -128,9 +128,9 @@ class Alignment(object):
             return ""
         
         # pipe through MUSCLE
-        muscle = Popen(['muscle','-quiet','-in','/dev/stdin'],stdin=PIPE,stdout=PIPE)
+        muscle = Popen(['muscle','-quiet','-maxiters',str(n_iter),'-in','/dev/stdin'],stdin=PIPE,stdout=PIPE)
         mfa = "\n".join(['>{spc}\n{seq}'.format(spc=spc, seq=self.nogaps[spc]) for spc in self.species])
-        self.logger.info('passing {size:.2f}kb of sequence ({n} species) through MUSCLE'.format(n=len(self.species),size=len(mfa)/1000.) )
+        self.logger.info('passing {size:.2f}kb of sequence ({n} species) through MUSCLE (maxiters={maxiters})'.format(n=len(self.species), size=len(mfa)/1000., maxiters=n_iter) )
         stdout,stderr = muscle.communicate(mfa)
 
         # sanitize output and re-order
@@ -138,7 +138,7 @@ class Alignment(object):
         for fa_id,seq in fasta_chunks(stdout.split('\n')):
             unordered[fa_id] = seq
         
-        return Alignment("\n".join([">%s\n%s" % (species,unordered[species]) for species in self.species]))
+        return Alignment("\n".join([">%s\n%s" % (species,unordered[species]) for species in self.species]), ref=self.ref)
         
 
     def __str__(self):
@@ -185,7 +185,7 @@ class MAFCoverageCollector(object):
     start and end coordinates of the orthologous sequences in other
     species.
     """
-    def __init__(self, ref, ref_start, ref_end, genome_provider, excess_threshold=5, min_len=3):
+    def __init__(self, ref, ref_start, ref_end, genome_provider, excess_threshold=2, min_len=1):
         from collections import defaultdict
         self.logger = logging.getLogger('pymaf.MAFCoverageCollector')
         self.excess_threshold = excess_threshold
@@ -424,7 +424,7 @@ class MAFBlockMultiGenomeAccessor(ArrayAccessor):
             res = [(species,chrom,start,end,strand,seq[::-1]) for species,chrom,start,end,strand,seq in res]
 
         mfa = "\n".join([">{species} {chrom}:{start}-{end}{strand}\n{seq}".format(**locals()) for species,chrom,start,end,strand,seq in res])
-        aln = self.aln_class(mfa)
+        aln = self.aln_class(mfa,ref=self.reference)
         return aln
     
     def get_dummy(self,chrom,start,end,sense):
@@ -448,31 +448,23 @@ def process_ucsc(src,system=None,segments=["UTR5","CDS","UTR3"],**kwargs):
             
             alignments = []
             for exon in chain.exons:
+                logger.debug('retrieving exon {exon.chrom}:{exon.start}-{exon.end}:{exon.sense} length={l}'.format(exon=exon, l = exon.end - exon.start))
                 aln = MAF_track.get_oriented(exon.chrom,exon.start,exon.end,exon.sense)
                 alignments.append(aln)
+                logger.debug('got {0} columns of alignment of {1} species'.format(aln.n_cols,len(aln.species)))
+                
 
             aln = alignments[0]
             if len(alignments) > 1:
                 for a in alignments[1:]:
                     aln = aln + a
-
-            # double for circRNA
-            aln.headers[0] += " from {chain.exon_count} exons of {chain.name} gene_name={chain.gene_id} n_cols = {aln.n_cols}".format(**locals())
-            #cds_start,cds_ens = chain.map_block_to_spliced(chain.CDS.start,chain.CDS.end)
             
-            #cds_start,cds_end = chain.map_block_to_spliced(chain.CDS.start,chain.CDS.end)
-            #ref_seq = aln.nogaps[aln.ref]
-            #if ref_seq[cds_start+1:cds_start+3].upper() == 'TG':
-                ## proper start-codon found?
-                #orf_start = cds_start
-            #else:
-                ## de novo search for longest ORF
-                #aa,orf_start,orf_end = find_ORF(ref_seq,len_thresh=10)
+            #print aln
+            if not aln.n_cols:
+                logger.error("Received empty Alignment({chain.name} {chain.chrom}:{chain.start}-{chain.end}:{chain.sense}). Region not covered by MAF? Skipping.".format(chain=chain))
+                continue
 
-            #if orf_start >= 0:
-                #for species in aln.species:
-                    #aln.highlight_ORF(orf_start,species)
-                    
+            aln.headers[0] += " from {chain.exon_count} exons of {chain.name} gene_name={chain.gene_id} n_cols = {aln.n_cols}".format(**locals())
             yield aln, chain.name
 
 def process_bed6(src,**kwargs):
@@ -501,9 +493,9 @@ if __name__ == '__main__':
     parser.add_option("-G","--genome-path",dest="genome_path",type=str,default="./",help="path to genomes (default='<maf-path>/genomes')")
     parser.add_option("-o","--output-path",dest="output_path",type=str,default="./",help="path to write output files to. if you pass '-', it prints on stdout instead (default='./')")
     parser.add_option("","--min-len",dest="min_len",type=int,default=1,help="minimum length of sequence to be included in the alignment (default=1)")
-    parser.add_option("","--excess-threshold",dest="excess_threshold",type=float,default=5,help="sequences are excluded from the alignemnt if they exceed <threshold> fold the length of the reference (default=5)")
+    parser.add_option("","--excess-threshold",dest="excess_threshold",type=float,default=2,help="sequences are excluded from the alignemnt if they exceed <threshold> fold the length of the reference (default=2)")
     parser.add_option("","--segments",dest="segments",default="UTR5,CDS,UTR3",help="which transcript segments (for BED12 or UCSC input) to scan (default=UTR5,CDS,UTR3). set to '' for whole transcript.")
-    parser.add_option("","--muscle",dest="muscle",default=False,action="store_true",help="activate re-alignment through MUSCLE. Warning, this can take a long time for large sequences! (default=Off)")
+    parser.add_option("","--muscle",dest="muscle",default=0,type=int,help="activate re-alignment through MUSCLE. Warning, this can take a long time for large sequences! Give number of iterations (default=0, MUSCLE-default=16, lionger values require more time)")
     parser.add_option("","--debug",dest="debug",default=False,action="store_true",help="activate extensive debug output (default=Off)")
     parser.add_option("-i","--input-format",dest="input_format",default="bed6",choices=["bed6","gff","bed12","ucsc"],help='which format does the input have? ["bed6","gff","bed12","ucsc"] default is bed6')
     options,args = parser.parse_args()
@@ -550,9 +542,9 @@ if __name__ == '__main__':
         'ucsc' : process_ucsc,
     }[options.input_format]
     
-    for aln,name in handler(src, muscle=options.muscle, system=options.system, segments=options.segments.split(',')):
+    for aln,name in handler(src, system=options.system, segments=options.segments.split(',')):
         if options.muscle:
-            mfa = str(aln.MUSCLE())
+            mfa = str(aln.MUSCLE(n_iter=options.muscle))
         else:
             mfa = str(aln)
 
