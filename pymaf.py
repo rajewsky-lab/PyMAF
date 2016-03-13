@@ -24,7 +24,7 @@ class GenomeProvider(object):
 
     
 class Alignment(object):
-    def __init__(self,mfa,ref=None):
+    def __init__(self, mfa, ref=None, acc=None):
         self.logger = logging.getLogger('pymaf.Alignment')
         self.nogaps = {}
         self.by_species = {}
@@ -32,6 +32,7 @@ class Alignment(object):
         self.headers = []
         self.spacers = []
         self.species_index = {}
+        self.acc = acc
 
         for i,(fa_id,seq) in enumerate(fasta_chunks(mfa.split('\n'))):
             self.headers.append(fa_id)
@@ -138,7 +139,7 @@ class Alignment(object):
         for fa_id,seq in fasta_chunks(stdout.split('\n')):
             unordered[fa_id] = seq
         
-        return Alignment("\n".join([">%s\n%s" % (species,unordered[species]) for species in self.species]), ref=self.ref)
+        return Alignment("\n".join([">%s\n%s" % (species,unordered[species]) for species in self.species]), ref=self.ref, acc=self.acc)
         
 
     def __str__(self):
@@ -160,7 +161,7 @@ class Alignment(object):
             raise ValueError("can't concatenate Alignment() instances with different reference species! '%s' != '%s'" % (self.ref,other.ref))
 
         # start with a new, empty alignment
-        new = Alignment("",ref = self.ref)
+        new = Alignment("",ref = self.ref, acc = self.acc)
 
         # only keep species that are in both blocks for now
         new.species = [s for s in self.species if s in other.species]
@@ -389,6 +390,12 @@ class MAFBlockMultiGenomeAccessor(ArrayAccessor):
         self.logger.debug("loaded %d feature combinations" % len(self.index))
         return True
 
+    def find_inside_region_by_species(self, ref_chrom, ref_start, ref_end, ref_sense, species, spc_start, spc_end):
+        comb_code_indices = [self.data[ref_start],self.data[ref_end]]
+        n_rows = len(comb_code_indices)
+        self.logger.debug('find_inside_region_by_species({species} {spc_start}-{spc_end}) binary-searching {n_rows} blocks'.format(**locals()) )
+        # TODO implement binary search for relevant maf block such that a MUSCLE alignment can be requested for a smaller region.
+    
     def get_data(self,chrom,start,end,sense):
         maf_starts = set()
         comb_code_indices = [self.data[start],self.data[end]]
@@ -424,15 +431,14 @@ class MAFBlockMultiGenomeAccessor(ArrayAccessor):
             res = [(species,chrom,start,end,strand,seq[::-1]) for species,chrom,start,end,strand,seq in res]
 
         mfa = "\n".join([">{species} {chrom}:{start}-{end}{strand}\n{seq}".format(**locals()) for species,chrom,start,end,strand,seq in res])
-        aln = self.aln_class(mfa,ref=self.reference)
+        aln = self.aln_class(mfa, ref=self.reference, acc=self)
         return aln
     
     def get_dummy(self,chrom,start,end,sense):
         return []
 
 
-
-def process_ucsc(src,system=None,segments=["UTR5","CDS","UTR3"],**kwargs):
+def process_ucsc(MAF_track, src,system=None,segments=["UTR5","CDS","UTR3"],**kwargs):
     from byo.gene_model import transcripts_from_UCSC
     from byo.protein import find_ORF
     logger = logging.getLogger('pymaf.process_ucsc')
@@ -467,7 +473,7 @@ def process_ucsc(src,system=None,segments=["UTR5","CDS","UTR3"],**kwargs):
             aln.headers[0] += " from {chain.exon_count} exons of {chain.name} gene_name={chain.gene_id} n_cols = {aln.n_cols}".format(**locals())
             yield aln, chain.name
 
-def process_bed6(src,**kwargs):
+def process_bed6(MAF_track, src,**kwargs):
     from byo.io.bed import bed_importer
     logger = logging.getLogger('pymaf.process_bed6')
     for bed in bed_importer(src):
@@ -542,7 +548,7 @@ if __name__ == '__main__':
         'ucsc' : process_ucsc,
     }[options.input_format]
     
-    for aln,name in handler(src, system=options.system, segments=options.segments.split(',')):
+    for aln,name in handler(MAF_track, src, system=options.system, segments=options.segments.split(',')):
         if options.muscle:
             mfa = str(aln.MUSCLE(n_iter=options.muscle))
         else:
