@@ -444,10 +444,11 @@ def process_ucsc(MAF_track, src,system=None,segments=["UTR5","CDS","UTR3"],**kwa
     logger = logging.getLogger('pymaf.process_ucsc')
 
     for tx in transcripts_from_UCSC(src,system=system):
-        if segments:
-            chains = [getattr(tx,seg,None) for seg in segments if getattr(tx,seg,None)]
-        else:
+
+        if segments == ['full']:
             chains = [tx]
+        else:
+            chains = [getattr(tx,seg,None) for seg in segments if getattr(tx,seg,None)]
 
         for chain in chains:
             logger.info("...retrieving sequences for {chain.name} {chain.chrom}:{chain.start}-{chain.end}:{chain.sense}".format(chain=chain))
@@ -500,7 +501,7 @@ if __name__ == '__main__':
     parser.add_option("-o","--output-path",dest="output_path",type=str,default="./",help="path to write output files to. if you pass '-', it prints on stdout instead (default='./')")
     parser.add_option("","--min-len",dest="min_len",type=int,default=1,help="minimum length of sequence to be included in the alignment (default=1)")
     parser.add_option("","--excess-threshold",dest="excess_threshold",type=float,default=2,help="sequences are excluded from the alignemnt if they exceed <threshold> fold the length of the reference (default=2)")
-    parser.add_option("","--segments",dest="segments",default="UTR5,CDS,UTR3",help="which transcript segments (for BED12 or UCSC input) to scan (default=UTR5,CDS,UTR3). set to '' for whole transcript.")
+    parser.add_option("","--segments",dest="segments",default="full",help="which transcript segments (for BED12 or UCSC input) to scan (default=full) set to any comma-separated list of UTR5,CDS,UTR3.")
     parser.add_option("","--muscle",dest="muscle",default=0,type=int,help="activate re-alignment through MUSCLE. Warning, this can take a long time for large sequences! Give number of iterations (default=0, MUSCLE-default=16, lionger values require more time)")
     parser.add_option("","--debug",dest="debug",default=False,action="store_true",help="activate extensive debug output (default=Off)")
     parser.add_option("-i","--input-format",dest="input_format",default="bed6",choices=["bed6","gff","bed12","ucsc"],help='which format does the input have? ["bed6","gff","bed12","ucsc"] default is bed6')
@@ -532,8 +533,10 @@ if __name__ == '__main__':
 
     if not args:
         src = sys.stdin
+        logger.info("reading from stdin")
     else:
         src = file(args[0])
+        logger.info("reading from {0}".format(args[0]) )
     
     if options.output_path and options.output_path != '-':
         # prepare output directory
