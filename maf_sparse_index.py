@@ -1,7 +1,9 @@
+#!/usr/bin/env python
 import numpy as np
 import os,re,sys
 import optparse
 import logging
+from byo.io.lz import LZFile
 
 logging.basicConfig(level=logging.DEBUG)
 log = logging.getLogger('maf_sparse_index.py')
@@ -61,7 +63,8 @@ def maf_to_loci(path,ref):
     i = 0
     prev_i = 0
     total = 0
-    for maf_line in file(path):
+
+    for maf_line in LZFile(path, compress_on_open=True):
         if maf_line.startswith(prefix):
             parts = re.split(r'\s+',maf_line)
             start,size,strand,total = parts[2:6]
