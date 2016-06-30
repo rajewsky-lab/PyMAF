@@ -1,3 +1,4 @@
+#!/usr/bin/env python
 import os,re,sys
 from byo import rev_comp,complement
 from byo.track import Track
@@ -371,7 +372,14 @@ class MAFBlockMultiGenomeAccessor(ArrayAccessor):
 
         index_file = os.path.join(self.maf_path,chrom+".comb_idx")
         if self.load_index(index_file,empty):
-            self.maf_file = file(os.path.join(self.maf_path,chrom+".maf"))
+            fname = os.path.join(self.maf_path,chrom+".maf")
+            if os.path.exists(fname):
+                self.logger.info("using uncompressed MAF {0}".format(fname))
+                self.maf_file = file(fname)
+            elif os.path.exists(fname + '.lzot'):
+                self.logger.info("using LZ-compressed MAF {0}".format(fname))
+                from byo.io.lz import LZFile
+                self.maf_file = LZFile(fname)
         else:
             self.logger.warning("could not find MAF index file '{0}'".format(index_file) )
             self.maf_file = None
