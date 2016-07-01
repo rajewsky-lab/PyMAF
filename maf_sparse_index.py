@@ -65,6 +65,7 @@ def maf_to_loci(path,ref, compress=True):
     # preparing the MAF file
     if path.endswith('.gz'):
         # directly read from GZ compressed input
+        logger.info("directly reading from GZip compressed file")
         from gzip import GzipFile
         lz = LZFile(
             path.replace('.gz',''), 
@@ -74,6 +75,7 @@ def maf_to_loci(path,ref, compress=True):
         )
     else:
         # read from uncompressed input
+        logger.info("reading from uncompressed file")
         lz = LZFile(path, compress_on_open=compress, chunksize = options.chunksize * 1024**2)
 
     for maf_line in lz:
@@ -139,3 +141,4 @@ if __name__ == "__main__":
             perc = 100. * start / float(chrom_size)
             logger.debug("{0:.2f} % of {1}".format(perc,name))
             
+    logger.info("done.")
