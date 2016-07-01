@@ -120,7 +120,7 @@ if __name__ == "__main__":
     name = os.path.basename(fname)
 
     comb_fname = os.path.join(path,name.replace(".maf",".comb_idx").replace('.gz',''))
-    bin_fname = os.path.join(path,name.replace(".maf",".comb_bin").replace('.gz',''))
+    bin_fname = os.path.join(path,name.replace(".maf",".comb_lz").replace('.gz',''))
 
     logger.info("collecting maf-blocks from '{0}' for reference '{1}'".format(fname,ref))
     maf_list,chrom_size = maf_to_loci(fname,ref, compress=not options.uncompressed)
@@ -129,16 +129,20 @@ if __name__ == "__main__":
 
     logger.info("writing combinations to '{0}' and lookup to binary sparse file '{1}'".format(comb_fname,bin_fname))
     comb = file(comb_fname,"w")
-    lkup = np.memmap(bin_fname,dtype=np.uint32,mode="w+",shape=(chrom_size,))
+    from byo.io.sparse_map import SparseMap
+    from blist import blist
 
+    lkup = SparseMap(chrom_size, el_type=np.uint32)
     for j,(combination,start,end) in enumerate(pileup_loci(maf_list)):
-        lkup[start:end] = j+1
+        # this bypasses SparseMap.__setslice__ for much more speed. Not ideal though.
+        lkup.data[start:end] = blist([j+1]) * (end-start)
         
         comb_str = ",".join(["%x" % maf_line for start,end,maf_line in combination]) + '\n'
         comb.write(comb_str)
         
-        if j and not j % 100000:
+        if j and not j % 10000:
             perc = 100. * start / float(chrom_size)
             logger.debug("{0:.2f} % of {1}".format(perc,name))
-            
+
+    lkup.store(bin_fname)
     logger.info("done.")
