@@ -3,7 +3,8 @@ import os,re,sys
 from byo import rev_comp,complement
 from byo.track import Track
 from byo.io.genome_accessor import GenomeAccessor
-from byo.io.array_accessor import ArrayAccessor
+#from byo.io.array_accessor import ArrayAccessor
+from byo.io.sparse_map import SparseMapAccessor
 from byo.io import fasta_chunks
 import numpy as np
 import logging
@@ -348,7 +349,7 @@ class MAFCoverageCollector(object):
 
                 yield species,chrom,start,end,strand,seq
 
-class MAFBlockMultiGenomeAccessor(ArrayAccessor):
+class MAFBlockMultiGenomeAccessor(SparseMapAccessor):
     """
     This class uses an mmap'ed, sparse lookup table and an index to find
     the MAF blocks overlapping the start and end of an arbitrary genomic
@@ -358,9 +359,9 @@ class MAFBlockMultiGenomeAccessor(ArrayAccessor):
     """
 
     def __init__(self,maf_path,chrom,sense,sense_specific=False,dtype=np.uint32,empty="",genome_provider=None,excess_threshold=5.,min_len=0,aln_class=Alignment,**kwargs):
-        super(MAFBlockMultiGenomeAccessor,self).__init__(maf_path,chrom,sense,dtype=dtype,sense_specific=False,ext=".comb_bin",**kwargs)
+        super(MAFBlockMultiGenomeAccessor,self).__init__(maf_path,chrom,sense,dtype=dtype,sense_specific=False,ext=".comb_lz",**kwargs)
         self.logger = logging.getLogger("pymaf.MAFBlockMultiGenomeAccessor")
-        self.logger.debug("mmap'ing '%s' lookup sparse-files and indices for chromosome %s" % (str(dtype),chrom))
+        self.logger.debug("loading '%s' lookup SparseMap files and indices for chromosome %s" % (str(dtype),chrom))
 
         self.maf_path = maf_path
         self.empty = empty
