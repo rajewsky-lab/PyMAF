@@ -56,7 +56,17 @@ class Alignment(object):
         
         self.n_cols = len(self.by_species.get(self.ref,""))
 
+    def lift_over(self, spc_A, pos_A, spc_B):
+        """
+        finds coordinate in spc_B that corresponds to coordinate pos_A in 
+        species spc_A. Coordinates (for now) have to be relative to the start 
+        position of the aligned sequences.
+        """
+        mfa_pos = self.spc_to_mfa[spc_A][pos_A]
+        return self.mfa_to_spc[spc_B][mfa_pos]
+
     def _init_mappings(self,species):
+        #self.logger.debug('_init_mappings()')
         x_spc = 0
         x_mfa = 0
         
@@ -180,6 +190,22 @@ class Alignment(object):
 
         return new
 
+    def refine_region(self, species, start, end):
+        """
+        Talks to the upstream MAFBlockMultiGenomeAccessor object to find the blocks within
+        the start and end coordinates in the requested species. This works by assuming that 
+        the relevant block(s) can be found between the original, reference species start and 
+        end coordinate determined blocks and is carried out by bisecting.
+        """
+        self.logger.debug(self.headers[0])
+        M = re.match(r"(?P<species>\S+) (?P<chrom>\S+)\:(?P<start>\d+)\-(?P<end>\d+)(?P<strand>[\+,\-])",self.headers[0])
+        d = M.groupdict()
+        self.logger.debug(d)
+        
+        M_spc = re.match(r"(?P<species>\S+) (?P<chrom>\S+)\:(?P<start>\d+)\-(?P<end>\d+)(?P<strand>[\+,\-])",self.headers[self.species_index[species]])
+        s = M_spc.groupdict()
+        return self.acc.find_inside_region_by_species(d['chrom'],int(d['start']), int(d['end']), d['strand'], species, s['chrom'], start, end)
+        
 
 class MAFCoverageCollector(object):
     """
@@ -188,7 +214,7 @@ class MAFCoverageCollector(object):
     start and end coordinates of the orthologous sequences in other
     species.
     """
-    def __init__(self, ref, ref_start, ref_end, genome_provider, excess_threshold=2, min_len=1):
+    def __init__(self, ref, ref_start, ref_end, genome_provider, excess_threshold=2, min_len=1, species=[]):
         from collections import defaultdict
         self.logger = logging.getLogger('pymaf.MAFCoverageCollector')
         self.excess_threshold = excess_threshold
@@ -206,7 +232,8 @@ class MAFCoverageCollector(object):
         self.species_left_adjust = defaultdict(int)
         self.species_right_adjust = defaultdict(int)
         self.species = []
-        
+        self.select_species = set(species)
+        self.logger.debug("select_species = {0}".format(species))
         self.ref_start_thisblock = None
         self.ref_end_thisblock = None
         
@@ -230,15 +257,22 @@ class MAFCoverageCollector(object):
         if strand == '+':
             end = start + size
         else:
-            start,end = total - (start + size),total - start
+            start, end = total - (start + size), total - start
             # if you think this is sick, go tell the evil master MAF and his
             # sidekick Dr. minus, the inventor of the minus strand, to their 
             # faces. ;)
-            
+
+        #self.logger.debug("adding '{0}', self.ref={3} self.ref_start={1} self.ref_end={2}".format(species, self.ref_start, self.ref_end, self.ref))
         if species == self.ref:
             # we are looking at the reference species!
             self.ref_start_thisblock = start
             self.ref_end_thisblock = end
+
+            # no ref_start given, use bounds of this block!
+            if self.ref_start == None:
+                self.ref_start = start
+            if self.ref_end == None:
+                self.ref_end = end
 
             if start <= self.ref_start:
                 # how many columns do we have to skip until we reach 
@@ -289,7 +323,6 @@ class MAFCoverageCollector(object):
         self.species_min_max[species] = (min(start,S),max(end,E))
         self.species_intervals[species].append( (start,end) )
 
-
     def get_sequences(self,sense):
         """
         This is a generator, yielding (species,chrom,start,end,strand,seq)
@@ -299,6 +332,10 @@ class MAFCoverageCollector(object):
         ref_len = self.ref_end - self.ref_start
 
         for species in self.species:
+            if not species in self.select_species and self.select_species:
+                #self.logger.debug("skipping species '{0}' because it was not selected".format(species))
+                continue
+
             if len(self.species_chroms[species]) > 1:
                 chrom_list = ','.join(sorted(self.species_chroms[species]))
                 self.logger.warning('sequence is split across different contigs/chroms {chrom_list} in species {species}'.format(**locals()))
@@ -351,9 +388,9 @@ class MAFCoverageCollector(object):
 
 class MAFBlockMultiGenomeAccessor(SparseMapAccessor):
     """
-    This class uses an mmap'ed, sparse lookup table and an index to find
+    This class uses an sparse lookup table (B+ tree) and an index to find
     the MAF blocks overlapping the start and end of an arbitrary genomic
-    span in constant time. It then parses these MAF blocks, extracts the
+    span in O(log(N)) time. It then parses these MAF blocks, extracts the
     orthologous coordinates for the aligned species and retrieves the
     orthologous genomic sequences (with the help of MAFCoverageCollector).
     """
@@ -361,7 +398,7 @@ class MAFBlockMultiGenomeAccessor(SparseMapAccessor):
     def __init__(self,maf_path,chrom,sense,sense_specific=False,dtype=np.uint32,empty="",genome_provider=None,excess_threshold=5.,min_len=0,aln_class=Alignment,**kwargs):
         super(MAFBlockMultiGenomeAccessor,self).__init__(maf_path,chrom,sense,dtype=dtype,sense_specific=False,ext=".comb_lz",**kwargs)
         self.logger = logging.getLogger("pymaf.MAFBlockMultiGenomeAccessor")
-        self.logger.debug("loading '%s' lookup SparseMap files and indices for chromosome %s" % (str(dtype),chrom))
+        self.logger.debug("loading '{0}' lookup SparseMap files and indices for chromosome {1}, system={2}".format(str(dtype),chrom, self.system))
 
         self.maf_path = maf_path
         self.empty = empty
@@ -399,13 +436,126 @@ class MAFBlockMultiGenomeAccessor(SparseMapAccessor):
         self.logger.debug("loaded %d feature combinations" % len(self.index))
         return True
 
-    def find_inside_region_by_species(self, ref_chrom, ref_start, ref_end, ref_sense, species, spc_start, spc_end):
-        comb_code_indices = [self.data[ref_start],self.data[ref_end]]
-        n_rows = len(comb_code_indices)
-        self.logger.debug('find_inside_region_by_species({species} {spc_start}-{spc_end}) binary-searching {n_rows} blocks'.format(**locals()) )
+    def find_inside_region_by_species(self, ref_chrom, ref_start, ref_end, ref_sense, species, spc_chrom, spc_start, spc_end, select_species = []):
         # TODO implement binary search for relevant maf block such that a MUSCLE alignment can be requested for a smaller region.
-    
-    def get_data(self,chrom,start,end,sense):
+        self.logger.debug("collecting candidate blocks inside {ref_start}-{ref_end}".format(ref_start=ref_start, ref_end=ref_end) )
+        
+        start_i = self.data[ref_start]
+        end_i = self.data[ref_end]
+        
+        block_starts = set()
+        for comb in self.index[start_i:end_i+1]:
+            block_starts |= set(comb.split(','))
+
+        block_starts = sorted([int(bs,16) for bs in block_starts])
+        n_rows = len(block_starts)
+        self.logger.debug('find_inside_region_by_species({species} {spc_start}-{spc_end}) binary-searching {n_rows} blocks'.format(**locals()) )        
+
+        # these are the only two we need to consider
+        select_species = [self.reference, species]
+        
+        def search_block(block_starts, pos):
+            
+            def recurse(block_starts, pos):
+                #print "recursion:", block_starts, pos
+                if not block_starts:
+                    return None
+
+                if len(block_starts) == 1:
+                    blk = self.load_block(block_starts[0], species=select_species)
+                    s,e = blk.species_min_max.get(species, (-1,-1))
+                    #print "checked block", block_starts, s,e, "?", pos
+                    if (s == e) or blk.species_chroms[species] != set([spc_chrom]):
+                        #print "ignore", s,e, blk.species_chroms[species], spc_chrom
+                        return "ignore",block_starts[0],blk
+                    elif s <= pos <= e:
+                        #print "hit"
+                        return "hit",block_starts[0],blk
+                    elif e < pos:
+                        #print "left"
+                        return "left",block_starts[0],blk
+                    elif s < pos:
+                        #print "right"
+                        return "right",block_starts[0],blk
+                else:
+                    #print "splitting interval"
+                    mid = len(block_starts)/2
+                    code, blk_start, blk = recurse([block_starts[mid]], pos)
+                    #print "result=", code, blk_start
+                    if code == "hit":
+                        return code, blk_start, blk
+                    elif code == "left":
+                        return recurse(block_starts[mid:], pos)
+                    elif code == "right":
+                        return recurse(block_starts[:mid], pos)
+                    elif code == "ignore":
+                        block_starts.pop(mid)
+                        return recurse(block_starts, pos)
+        
+            res = recurse(list(block_starts), pos)
+            #print "search received", res
+            if not res:
+                return None
+            
+            code, blk_start, blk = res
+            if code == 'hit' : 
+                return blk_start, blk
+            else:
+                return None
+            
+        #print "-----searching start",block_starts
+        start_search = search_block(block_starts, spc_start)
+        #print "-----searching end",block_starts
+        end_search   = search_block(block_starts, spc_end)
+
+        #print start_search
+        #print end_search
+
+        if not (start_search and end_search):
+            return 
+        
+        start_row, start_cov = start_search
+        end_row, end_cov = end_search
+        
+        start_mfa = "\n".join([">{species} {chrom}:{start}-{end}{strand}\n{seq}".format(**locals()) for species,chrom,start,end,strand,seq in start_cov.get_sequences(ref_sense)])
+        start_aln = self.aln_class(start_mfa, ref=self.reference, acc=self)
+
+        end_mfa = "\n".join([">{species} {chrom}:{start}-{end}{strand}\n{seq}".format(**locals()) for species,chrom,start,end,strand,seq in end_cov.get_sequences(ref_sense)])
+        end_aln = self.aln_class(end_mfa, ref=self.reference, acc=self)
+
+        start_ofs_spc = start_cov.species_min_max[species][0]
+        start_ofs_ref = start_cov.species_min_max[self.reference][0]
+        
+        end_ofs_spc = end_cov.species_min_max[species][0]
+        end_ofs_ref = end_cov.species_min_max[self.reference][0]
+        
+        ref_start = start_aln.lift_over(species, spc_start - start_ofs_spc, self.reference) + start_ofs_ref
+        ref_end   =   end_aln.lift_over(species, spc_end   - end_ofs_spc,   self.reference) + end_ofs_ref
+
+        return ref_start, ref_end
+
+
+    def load_block(self, block_start, coverage=None, species=[]):
+        if not coverage:
+            coverage = MAFCoverageCollector(self.reference,None,None,self.genome_provider, excess_threshold=self.excess_threshold, min_len=self.min_len, species=species )        
+
+        self.maf_file.seek(block_start)
+        for line in self.maf_file:
+            #print start,end,line.rstrip()
+            try:
+                coverage.add_MAF_line(line)
+            except:
+                import traceback
+                self.logger.error("unhandled exception while parsing MAF-line '{0}'".format(line.rstrip()))
+                exc = traceback.format_exc()
+                logging.error(exc)
+
+            if not line.strip():
+                break
+
+        return coverage
+        
+    def get_data(self,chrom,start,end,sense, species = []):
         maf_starts = set()
         comb_code_indices = [self.data[start],self.data[end]]
         #comb_code_indices = self.data[start:end]
@@ -415,26 +565,14 @@ class MAFBlockMultiGenomeAccessor(SparseMapAccessor):
         for comb in set(comb_codes):
             maf_starts |= set(comb.split(','))
         #print maf_starts
-        coverage = MAFCoverageCollector(self.reference,start,end,self.genome_provider, excess_threshold=self.excess_threshold, min_len=self.min_len )
+        coverage = MAFCoverageCollector(self.reference,start,end,self.genome_provider, excess_threshold=self.excess_threshold, min_len=self.min_len, species=species )
         for m_start in sorted([int(m,16) for m in maf_starts]):
-            self.maf_file.seek(m_start)
-            for line in self.maf_file:
-                #print start,end,line.rstrip()
-                try:
-                    coverage.add_MAF_line(line)
-                except:
-                    import traceback
-                    self.logger.error("unhandled exception while parsing MAF-line '{0}'".format(line.rstrip()))
-                    exc = traceback.format_exc()
-                    logging.error(exc)
+            coverage = self.load_block(m_start, coverage = coverage)
 
-                if not line.strip():
-                    break
-                
         return list(coverage.get_sequences(sense))
 
-    def get_oriented(self,chrom,start,end,sense):
-        res = self.get_data(chrom,start,end,sense)
+    def get_oriented(self,chrom,start,end,sense, species=[]):
+        res = self.get_data(chrom,start,end,sense, species=species)
         if sense == '-':
             # get_data returned already complement(seq). Only need to reverse.
             res = [(species,chrom,start,end,strand,seq[::-1]) for species,chrom,start,end,strand,seq in res]
