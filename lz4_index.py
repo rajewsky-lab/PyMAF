@@ -72,7 +72,7 @@ if __name__ == '__main__':
 
     parser = OptionParser(usage=usage)
     parser.add_option("","--debug",dest="debug",default=False,action="store_true",help="activate extensive debug output (default=Off)")
-    parser.add_option("-d","--decompress", dest="decompress", default=False, action="store_true", help='decompress an LZ4 compressed file (.lzot/.lzoc suffixes will be removed from filename)')
+    parser.add_option("-d","--decompress", dest="decompress", default=False, action="store_true", help='decompress an LZ4 compressed file to stdout (.lzot/.lzoc suffixes will be removed from filename)')
     options,args = parser.parse_args()
 
     # prepare logging system
