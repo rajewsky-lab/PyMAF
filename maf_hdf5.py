@@ -205,7 +205,7 @@ class MAFBlockDB(object):
                 print "ignoring unknown MAF line '{0}'".format(maf_line.strip())
                 
 
-        self.logger.debug("done processing MAF blocks. Building indices")
+        self.logger.info("done processing MAF blocks. Building indices")
         self.h5.root.maf.blocks.cols.chrom.create_index()
         self.h5.root.maf.blocks.cols.species.create_index()
         self.h5.root.maf.blocks.cols.block_id.create_index()    
@@ -233,12 +233,10 @@ class MAFBlockDB(object):
         for ref_hit in self.h5.root.maf.blocks.where("(species == ref_species) & (chrom == ref_chrom) & (start < ref_end) & (end > ref_start)"):
             rows = []
             ref_id = ref_hit['block_id']
-            if select_species:
-                cond = "(block_id == ref_id) & (species in select_species)" # does this work?
-            else:
-                cond = "(block_id == ref_id)"
             
-            for spc_hit in self.h5.root.maf.blocks.where(cond):
+            for spc_hit in self.h5.root.maf.blocks.where("(block_id == ref_id)"):
+                if select_species and not (spc_hit['species'] in select_species):
+                    continue
                 rows.append( MAFRecord(spc_hit, seqs[spc_hit['seq_id']]) )
                 
             yield rows

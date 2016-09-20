@@ -1,28 +1,26 @@
+"""
+Part of the PyMAF package. This file holds useful high-level representations of
+multiple species alignments and the top-level interface to query the MAF-block
+database and obtain alignments for arbitrary regions
+"""
+
+__author__ = "Marvin Jens"
+__copyright__ = "Copyright 2016, Massachusetts Institute of Technology"
+__credits__ = ["Marvin Jens"]
+__license__ = "MIT"
+__version__ = "0.7"
+__email__ = "mjens@mit.edu"
+__status__ = "beta"
+
+
 import os,re,sys
 from byo import rev_comp,complement
 from byo.track import Track, Accessor
-from byo.io.genome_accessor import TwoBitAccessor
 from byo.io import fasta_chunks
-import numpy as np
 import logging
 
 from PyMAF.maf_hdf5 import MAFBlockDB
-
-class GenomeProviderCache(object):
-    def __init__(self,path):
-        self.cached = {}
-        self.path = path
-        self.logger = logging.getLogger("pymaf.GenomeProviderCache")
-
-    def __getitem__(self,name):
-        if not name in self.cached:
-            logging.debug("{0} not in genome cache".format(name))
-            self.cached[name] = Track(self.path,TwoBitAccessor,system=name,split_chrom='.')
-        else:
-            logging.debug("genome cache hit! {0}".format(name))
-
-        return self.cached[name]
-
+from byo.io.genome_accessor import GenomeCache
     
 class Alignment(object):
     def __init__(self, mfa, ref=None, acc=None):
@@ -287,8 +285,8 @@ class MAFCoverageCollector(object):
                 # count non-gap positions after the ref_end/right_col
                 self.species_right_adjust[row.species] = (len(row.seq)-self.right_col) - row.seq[self.right_col:].count('-') 
                 
-        strand = row.species + row.sense
         # record the encountered species, their contigs and strands
+        strand = row.sense
         if not row.species in self.species_strands:
             self.species.append(row.species)
 
@@ -345,13 +343,14 @@ class MAFCoverageCollector(object):
                     start += self.species_right_adjust[species]
 
             if end - start > ref_len* self.excess_threshold:
-                self.logger.warning('homologous sequence exceeds {0} times the reference sequence for {1}. skipping!'.format(self.excess_threshold, species))
+                self.logger.warning('homologous sequence exceeds {0}x times the reference sequence for {1}. skipping!'.format(self.excess_threshold, species))
                 continue
 
             if end - start < self.min_len:
                 self.logger.warning('skipping homologous sequence of length {0} < min_len of {1} for {2}!'.format(end-start, self.min_len, species))
                 continue
-                
+
+            #print "retrieving for species='{species}' chrom='{chrom}' sense='{strand}'".format(**locals())
             seq = genome.get_oriented(chrom.split('.')[0],start,end,strand).upper()
             if genome.no_data:
                 self.logger.warning("skipping {species} due to missing genome".format(**locals()))
@@ -377,7 +376,7 @@ class MAFBlockMultiGenomeAccessor(Accessor):
     orthologous genomic sequences (with the help of MAFCoverageCollector).
     """
 
-    def __init__(self,maf_path,chrom,sense,sense_specific=False,dtype=np.uint32,empty="",genome_provider=None,excess_threshold=5.,min_len=0,aln_class=Alignment,**kwargs):
+    def __init__(self,maf_path,chrom,sense,sense_specific=False,empty="",genome_provider=None,excess_threshold=5.,min_len=0,aln_class=Alignment,**kwargs):
         super(MAFBlockMultiGenomeAccessor,self).__init__(maf_path,chrom,sense,dtype=dtype,sense_specific=False,**kwargs)
         self.logger = logging.getLogger("pymaf.MAFBlockMultiGenomeAccessor")
         self.logger.debug("loading '{0}' HDF5 file chromosome {1}, system={2}".format(str(dtype),chrom, self.system))
@@ -525,7 +524,7 @@ class MAFBlockMultiGenomeAccessor(Accessor):
         return []
 
 def get_track(genome_path, maf_path, reference_species, excess_threshold=2, min_len=1):
-    genome_provider = GenomeProviderCache(genome_path)
+    genome_provider = GenomeCache(genome_path)
     MAF_track = Track(
         maf_path,
         MAFBlockMultiGenomeAccessor,
