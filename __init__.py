@@ -377,9 +377,8 @@ class MAFBlockMultiGenomeAccessor(Accessor):
     """
 
     def __init__(self,maf_path,chrom,sense,sense_specific=False,empty="",genome_provider=None,excess_threshold=5.,min_len=0,aln_class=Alignment,**kwargs):
-        super(MAFBlockMultiGenomeAccessor,self).__init__(maf_path,chrom,sense,dtype=dtype,sense_specific=False,**kwargs)
+        super(MAFBlockMultiGenomeAccessor,self).__init__(maf_path,chrom,sense,sense_specific=False,**kwargs)
         self.logger = logging.getLogger("pymaf.MAFBlockMultiGenomeAccessor")
-        self.logger.debug("loading '{0}' HDF5 file chromosome {1}, system={2}".format(str(dtype),chrom, self.system))
 
         self.maf_path = maf_path
         self.empty = empty
