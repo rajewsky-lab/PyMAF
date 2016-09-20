@@ -1,0 +1,130 @@
+#!/usr/bin/env python
+import os,re,sys
+import logging
+from PyMAF import get_track
+
+def process_ucsc(MAF_track, src,system=None,segments=["UTR5","CDS","UTR3"],**kwargs):
+    from byo.gene_model import transcripts_from_UCSC
+    from byo.protein import find_ORF
+    logger = logging.getLogger('pymaf.process_ucsc')
+
+    for tx in transcripts_from_UCSC(src,system=system):
+
+        if segments == ['full']:
+            chains = [tx]
+        else:
+            chains = [getattr(tx,seg,None) for seg in segments if getattr(tx,seg,None)]
+
+        for chain in chains:
+            logger.info("...retrieving sequences for {chain.name} {chain.chrom}:{chain.start}-{chain.end}:{chain.sense}".format(chain=chain))
+            
+            alignments = []
+            for exon in chain.exons:
+                logger.debug('retrieving exon {exon.chrom}:{exon.start}-{exon.end}:{exon.sense} length={l}'.format(exon=exon, l = exon.end - exon.start))
+                aln = MAF_track.get_oriented(exon.chrom,exon.start,exon.end,exon.sense)
+                alignments.append(aln)
+                logger.debug('got {0} columns of alignment of {1} species'.format(aln.n_cols,len(aln.species)))
+                
+
+            aln = alignments[0]
+            if len(alignments) > 1:
+                for a in alignments[1:]:
+                    aln = aln + a
+            
+            #print aln
+            if not aln.n_cols:
+                logger.error("Received empty Alignment({chain.name} {chain.chrom}:{chain.start}-{chain.end}:{chain.sense}). Region not covered by MAF? Skipping.".format(chain=chain))
+                continue
+
+            aln.headers[0] += " from {chain.exon_count} exons of {chain.name} gene_name={chain.gene_id} n_cols = {aln.n_cols}".format(**locals())
+            yield aln, chain.name
+
+
+def process_bed6(MAF_track, src,**kwargs):
+    from byo.io.bed import bed_importer
+    logger = logging.getLogger('pymaf.process_bed6')
+    for bed in bed_importer(src):
+        logger.info("...retrieving sequences for {bed.name} {bed.chrom}:{bed.start}-{bed.end}:{bed.strand}".format(bed=bed))
+        aln = MAF_track.get_oriented(bed.chrom,bed.start,bed.end,bed.strand)
+        yield aln, bed.name
+
+
+def not_implemented(*argc,**kwargs):
+    logging.error("INPUT FORMAT NOT IMPLEMENTED!")
+    sys.exit(1)
+
+
+if __name__ == '__main__':
+    from optparse import *
+    usage = """
+    usage: %prog [options] <input_file.bed|gff|ucsc>
+    """
+
+    parser = OptionParser(usage=usage)
+    parser.add_option("-r","--reference",dest="reference",type=str,default=None,help="reference species (hg19|dm6|...)")
+    parser.add_option("-M","--maf-path",dest="maf_path",type=str,default="",help="path to HDF5 MAF files (default='./')")
+    parser.add_option("-G","--genome-path",dest="genome_path",type=str,default="./",help="path to genomes (default='<maf-path>/genomes')")
+    parser.add_option("-o","--output-path",dest="output_path",type=str,default="./",help="path to write output files to. if you pass '-', it prints on stdout instead (default='./')")
+    parser.add_option("","--min-len",dest="min_len",type=int,default=1,help="minimum length of sequence to be included in the alignment (default=1)")
+    parser.add_option("","--excess-threshold",dest="excess_threshold",type=float,default=2,help="sequences are excluded from the alignemnt if they exceed <threshold> fold the length of the reference (default=2)")
+    parser.add_option("","--segments",dest="segments",default="full",help="which transcript segments (for BED12 or UCSC input) to scan (default=full) set to any comma-separated list of UTR5,CDS,UTR3.")
+    parser.add_option("","--muscle",dest="muscle",default=0,type=int,help="activate re-alignment through MUSCLE. Warning, this can take a long time for large sequences! Give number of iterations (default=0, MUSCLE-default=16, lionger values require more time)")
+    parser.add_option("","--debug",dest="debug",default=False,action="store_true",help="activate extensive debug output (default=Off)")
+    parser.add_option("-i","--input-format",dest="input_format",default="bed6",choices=["bed6","gff","bed12","ucsc"],help='which format does the input have? ["bed6","gff","bed12","ucsc"] default is bed6')
+    options,args = parser.parse_args()
+
+    # prepare logging system
+    FORMAT = '%(asctime)-20s\t%(levelname)s\t%(name)-25s\t%(message)s'
+    if options.debug:
+        logging.basicConfig(level=logging.DEBUG,format=FORMAT)
+    else:
+        logging.basicConfig(level=logging.INFO,format=FORMAT)
+    logger = logging.getLogger('pymaf.main()')
+    
+    if not options.genome_path:
+        genome_path = os.path.join(options.maf_path,'genomes')
+    else:
+        genome_path = options.genome_path
+
+    MAF_track = get_track(
+        os.path.abspath(genome_path), 
+        os.path.abspath(options.maf_path), 
+        options.reference, 
+        excess_threshold=options.excess_threshold, 
+        min_len=options.min_len
+    )
+
+    if not args:
+        src = sys.stdin
+        logger.info("reading from stdin")
+    else:
+        src = file(args[0])
+        logger.info("reading from {0}".format(args[0]) )
+    
+    if options.output_path and options.output_path != '-':
+        # prepare output directory
+        if not os.path.isdir(options.output_path):
+            os.makedirs(options.output_path)
+        
+        
+    handler = { 
+        'bed6' : process_bed6,
+        'bed12' : not_implemented,
+        'gff' : not_implemented,
+        'ucsc' : process_ucsc,
+    }[options.input_format]
+    
+    for aln,name in handler(MAF_track, src, system=options.reference, segments=options.segments.split(',')):
+        if options.muscle:
+            mfa = str(aln.MUSCLE(n_iter=options.muscle))
+        else:
+            mfa = str(aln)
+
+        if options.output_path == '-' or not options.output_path:
+            print mfa
+        else:
+            out_file = os.path.join(options.output_path, "{0}.fa".format(name))
+            logger.info("storing {name} in {out_file}".format(name=name, out_file=out_file))
+            file(out_file,'w').write(mfa)
+
+    
