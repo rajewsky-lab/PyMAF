@@ -33,8 +33,8 @@ FORMAT = '%(asctime)-20s\t%(levelname)s\t%(name)-25s\t%(message)s'
 logging.basicConfig(level=logging.DEBUG,format=FORMAT)
 
 from PyMAF.pymaf import *
-genome_path = "/home/mjens/data/genomes"
-maf_path = "/home/mjens/data/maf/mm10_60way/maf"
+genome_path = "/scratch/data/genomes"
+maf_path = "/scratch/data/maf/mm10_60way/maf"
 
 genome_provider = GenomeProvider(genome_path)
 
@@ -43,7 +43,8 @@ MAF_track = Track(
     MAFBlockMultiGenomeAccessor,
     sense_specific=False,
     genome_provider=genome_provider,
-    system='mm10'
+    system='mm10',
+    auto_flush=True,
 )
 
 
