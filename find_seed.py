@@ -2,6 +2,8 @@ import os,sys,re
 import byo.gene_model
 from glob import glob
 import logging
+import numpy as np
+
 FORMAT = '%(asctime)-20s\t%(levelname)s\t%(name)-25s\t%(message)s'
 logging.basicConfig(level=logging.DEBUG,format=FORMAT)
 logger = logging.getLogger('find_seed')
@@ -18,7 +20,7 @@ seed6 = rev_comp(let7[1:7])
 import PyMAF as pm
 genome_path = "/scratch/data/genomes"
 maf_path = "/scratch/data/maf/mm10_60way/maf"
-MAF_track = pm.get_track(genome_path, maf_path, 'mm10')
+MAF_track = pm.get_track(genome_path, maf_path, 'mm10', new_chrom_flush=True, in_memory=True, muscle_iterations = 8)
 
 print "seeds", seed8, seed6
 def get_seed_alignment(chain, species = []):
@@ -59,16 +61,20 @@ for tx in transcripts_from_UCSC(sys.stdin, system=mm10):
     #print "#",seq
     for M in re.finditer(seed8, seq):
         start, end = chain.map_block_from_spliced(*M.span())
-        site = chain.cut(start-2, end + 2)
-        print "found seed", site, tx.name
+        site = chain.cut(start-5, end + 5)
+        #print "found seed", site, tx.name, tx.key
         aln = get_seed_alignment(site, species=['mm10','hg19'])
         
-        print aln
-        if test_seed(aln, seed6, 'hg19'):
-            print "human conserved :("
-        else:
-            print "human let-7 seed match lost!"
+        #print aln
+        if not test_seed(aln, seed6, 'hg19'):
             context = chain.cut(start-6, end + 6)
             aln_detail = get_seed_alignment(context, species=[])
-            print aln_detail
+            
+            present_mask = np.array([test_seed(aln_detail, seed6, spc) for spc in aln_detail.species])
+            n_present = present_mask.sum()
+            if n_present > 3:
+                print "seed match at {site.key} interesting!".format(site=site)
+                print "present in {0} species, but not human!".format(n_present)
+                print aln_detail
+                print present_mask
 
