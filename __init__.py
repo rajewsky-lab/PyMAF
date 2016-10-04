@@ -211,10 +211,11 @@ class MAFCoverageCollector(object):
     start and end coordinates of the orthologous sequences in other
     species.
     """
-    def __init__(self, ref, ref_start, ref_end, genome_provider, excess_threshold=2, min_len=1, species=[]):
+    def __init__(self, ref, ref_start, ref_end, genome_provider, excess_threshold=2, lack_threshold=0.1, min_len=1, species=[]):
         from collections import defaultdict
         self.logger = logging.getLogger('pymaf.MAFCoverageCollector')
         self.excess_threshold = excess_threshold
+        self.lack_threshold = lack_threshold
         self.min_len = min_len
         self.ref = ref
         self.ref_start = ref_start
@@ -346,6 +347,10 @@ class MAFCoverageCollector(object):
                 self.logger.warning('homologous sequence exceeds {0}x times the reference sequence for {1}. skipping!'.format(self.excess_threshold, species))
                 continue
 
+            if end - start < ref_len* self.lack_threshold:
+                self.logger.warning('skipping homologous sequence shorter than {0}x times the reference sequence for {1}. skipping!'.format(self.lack_threshold, species))
+                continue
+
             if end - start < self.min_len:
                 self.logger.warning('skipping homologous sequence of length {0} < min_len of {1} for {2}!'.format(end-start, self.min_len, species))
                 continue
@@ -376,7 +381,7 @@ class MAFBlockMultiGenomeAccessor(Accessor):
     orthologous genomic sequences (with the help of MAFCoverageCollector).
     """
 
-    def __init__(self,maf_path,chrom,sense,sense_specific=False,empty="",genome_provider=None,excess_threshold=5.,min_len=0,aln_class=Alignment,**kwargs):
+    def __init__(self,maf_path,chrom,sense,sense_specific=False,empty="",genome_provider=None,excess_threshold=5.,lack_threshold=.0,min_len=0, aln_class=Alignment, muscle_iterations=0, in_memory=False, **kwargs):
         super(MAFBlockMultiGenomeAccessor,self).__init__(maf_path,chrom,sense,sense_specific=False,**kwargs)
         self.logger = logging.getLogger("pymaf.MAFBlockMultiGenomeAccessor")
 
@@ -386,10 +391,11 @@ class MAFBlockMultiGenomeAccessor(Accessor):
         self.aln_class = aln_class
         self.genome_provider = genome_provider
         self.excess_threshold = excess_threshold
+        self.lack_threshold = lack_threshold
         self.min_len = min_len
-        
+        self.muscle_iterations = muscle_iterations
         h5path = os.path.join(self.maf_path,chrom+".maf.h5")
-        self.maf_file = MAFBlockDB(h5path)
+        self.maf_file = MAFBlockDB(h5path, in_memory=in_memory)
         
 
     def find_inside_region_by_species(self, ref_chrom, ref_start, ref_end, ref_sense, species, spc_chrom, spc_start, spc_end, select_species = []):
@@ -498,6 +504,7 @@ class MAFBlockMultiGenomeAccessor(Accessor):
             ref_end,
             self.genome_provider,
             excess_threshold=self.excess_threshold,
+            lack_threshold=self.lack_threshold,
             min_len=self.min_len,
             species=select_species
         )
@@ -517,21 +524,31 @@ class MAFBlockMultiGenomeAccessor(Accessor):
 
         mfa = "\n".join([">{species} {chrom}:{start}-{end}{strand}\n{seq}".format(**locals()) for species,chrom,start,end,strand,seq in res])
         aln = self.aln_class(mfa, ref=self.reference, acc=self)
-        return aln
+        if self.muscle_iterations:
+            return aln.MUSCLE(n_iter=self.muscle_iterations)
+        else:
+            return aln
     
     def get_dummy(self,chrom,start,end,sense):
         return []
+    
+    def flush(self):
+        self.maf_file.close()
 
-def get_track(genome_path, maf_path, reference_species, excess_threshold=2, min_len=1):
+def get_track(genome_path, maf_path, reference_species, excess_threshold=2, lack_threshold=2, min_len=1, new_chrom_flush=False, in_memory=False, muscle_iterations = 0):
     genome_provider = GenomeCache(genome_path)
     MAF_track = Track(
         maf_path,
         MAFBlockMultiGenomeAccessor,
+        auto_flush=new_chrom_flush,
         sense_specific=False,
         genome_provider=genome_provider,
         excess_threshold=excess_threshold,
+        lack_threshold=lack_threshold,
         min_len=min_len,
-        system=reference_species
+        system=reference_species,
+        in_memory = in_memory,
+        muscle_iterations = muscle_iterations,
     )
     return MAF_track
     
