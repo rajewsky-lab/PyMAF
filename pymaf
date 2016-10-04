@@ -3,19 +3,28 @@ import os,re,sys
 import logging
 from PyMAF import get_track
 
-def process_ucsc(MAF_track, src,system=None,segments=["UTR5","CDS","UTR3"],**kwargs):
-    from byo.gene_model import transcripts_from_UCSC
-    from byo.protein import find_ORF
-    logger = logging.getLogger('pymaf.process_ucsc')
+def process_gff(MAF_track, src,system=None, flank=0, sort_chrom=False, segments=["UTR5","CDS","UTR3"],**kwargs):
+    from byo.gene_model import transcripts_from_GTF
+    logger = logging.getLogger('pymaf.process_gtf')
 
-    for tx in transcripts_from_UCSC(src,system=system):
+    if sort_chrom:
+        records = sort_by_chrom(transcripts_from_GTF(src,system=system))
+    else:
+        records = transcripts_from_GTF(src,system=system)
 
+    for tx in records:
         if segments == ['full']:
             chains = [tx]
         else:
             chains = [getattr(tx,seg,None) for seg in segments if getattr(tx,seg,None)]
 
         for chain in chains:
+            if flank:
+                # extend bounds of first+last exon
+                chain.exon_starts[0] -= flank
+                chain.exon_ends[-1] += flank
+                chain._setup()
+            
             logger.info("...retrieving sequences for {chain.name} {chain.chrom}:{chain.start}-{chain.end}:{chain.sense}".format(chain=chain))
             
             alignments = []
@@ -40,12 +49,70 @@ def process_ucsc(MAF_track, src,system=None,segments=["UTR5","CDS","UTR3"],**kwa
             yield aln, chain.name
 
 
-def process_bed6(MAF_track, src,**kwargs):
+def sort_by_chrom(src):
+    from operator import attrgetter
+    return sorted(list(src), key=attrgetter('chrom'))
+    
+def process_ucsc(MAF_track, src,system=None, flank=0, sort_chrom=False, segments=["UTR5","CDS","UTR3"],**kwargs):
+    from byo.gene_model import transcripts_from_UCSC
+    from byo.protein import find_ORF
+    logger = logging.getLogger('pymaf.process_ucsc')
+
+    if sort_chrom:
+        records = sort_by_chrom(transcripts_from_UCSC(src,system=system))
+    else:
+        records = transcripts_from_UCSC(src,system=system)
+
+    for tx in records:
+
+        if segments == ['full']:
+            chains = [tx]
+        else:
+            chains = [getattr(tx,seg,None) for seg in segments if getattr(tx,seg,None)]
+
+        for chain in chains:
+            if flank:
+                # extend bounds of first+last exon
+                chain.exon_starts[0] -= flank
+                chain.exon_ends[-1] += flank
+                chain._setup()
+                
+            logger.info("...retrieving sequences for {chain.name} {chain.chrom}:{chain.start}-{chain.end}:{chain.sense}".format(chain=chain))
+            
+            alignments = []
+            for exon in chain.exons:
+                logger.debug('retrieving exon {exon.chrom}:{exon.start}-{exon.end}:{exon.sense} length={l}'.format(exon=exon, l = exon.end - exon.start))
+                aln = MAF_track.get_oriented(exon.chrom,exon.start,exon.end,exon.sense)
+                alignments.append(aln)
+                logger.debug('got {0} columns of alignment of {1} species'.format(aln.n_cols,len(aln.species)))
+                
+
+            aln = alignments[0]
+            if len(alignments) > 1:
+                for a in alignments[1:]:
+                    aln = aln + a
+            
+            #print aln
+            if not aln.n_cols:
+                logger.error("Received empty Alignment({chain.name} {chain.chrom}:{chain.start}-{chain.end}:{chain.sense}). Region not covered by MAF? Skipping.".format(chain=chain))
+                continue
+
+            aln.headers[0] += " from {chain.exon_count} exons of {chain.name} gene_name={chain.gene_id} n_cols = {aln.n_cols}".format(**locals())
+            yield aln, chain.name
+
+
+def process_bed6(MAF_track, src, flank=0, sort_chrom=False, **kwargs):
     from byo.io.bed import bed_importer
     logger = logging.getLogger('pymaf.process_bed6')
-    for bed in bed_importer(src):
+    
+    if sort_chrom:
+        records = sort_by_chrom(bed_importer(src))
+    else:
+        records = bed_importer(src)
+        
+    for bed in records:
         logger.info("...retrieving sequences for {bed.name} {bed.chrom}:{bed.start}-{bed.end}:{bed.strand}".format(bed=bed))
-        aln = MAF_track.get_oriented(bed.chrom,bed.start,bed.end,bed.strand)
+        aln = MAF_track.get_oriented(bed.chrom,bed.start-flank,bed.end+flank,bed.strand)
         yield aln, bed.name
 
 
@@ -66,12 +133,21 @@ if __name__ == '__main__':
     parser.add_option("-G","--genome-path",dest="genome_path",type=str,default="./",help="path to genomes (default='<maf-path>/genomes')")
     parser.add_option("-o","--output-path",dest="output_path",type=str,default="./",help="path to write output files to. if you pass '-', it prints on stdout instead (default='./')")
     parser.add_option("","--min-len",dest="min_len",type=int,default=1,help="minimum length of sequence to be included in the alignment (default=1)")
-    parser.add_option("","--excess-threshold",dest="excess_threshold",type=float,default=2,help="sequences are excluded from the alignemnt if they exceed <threshold> fold the length of the reference (default=2)")
+    parser.add_option("","--flank",dest="flank",type=int,default=0,help="retrieve this many flanking nucleotides (default=0)")
+    parser.add_option("","--sort-chrom",dest="sort_chrom",action="store_true",default=False,help="Switch: pre-sort features by chromosome, allowing to minimize MAF file loading")
+    parser.add_option("","--in-mem",dest="in_mem",action="store_true",default=False,help="Switch: open HDF5 files as in-memory files. This makes queries faster but may use a lot of RAM")
+    parser.add_option("","--excess-threshold",dest="excess_threshold",type=float,default=2,help="sequences are excluded from the alignemnt if they exceed <threshold> fold the length of the reference (default=2.0)")
+    parser.add_option("","--lack-threshold",dest="lack_threshold",type=float,default=.1,help="sequences are excluded from the alignment if they are shorter than <threshold> fold the length of the reference (default=0.1)")
+
     parser.add_option("","--segments",dest="segments",default="full",help="which transcript segments (for BED12 or UCSC input) to scan (default=full) set to any comma-separated list of UTR5,CDS,UTR3.")
     parser.add_option("","--muscle",dest="muscle",default=0,type=int,help="activate re-alignment through MUSCLE. Warning, this can take a long time for large sequences! Give number of iterations (default=0, MUSCLE-default=16, lionger values require more time)")
-    parser.add_option("","--debug",dest="debug",default=False,action="store_true",help="activate extensive debug output (default=Off)")
+    parser.add_option("","--debug",dest="debug",default=False,action="store_true",help="Switch: activate extensive debug output (default=Off)")
     parser.add_option("-i","--input-format",dest="input_format",default="bed6",choices=["bed6","gff","bed12","ucsc"],help='which format does the input have? ["bed6","gff","bed12","ucsc"] default is bed6')
     options,args = parser.parse_args()
+
+    if not options.reference:
+        parser.error("you need to set the reference species with -r (e.g mm10, hg19, etc.)")
+        sys.exit(1)
 
     # prepare logging system
     FORMAT = '%(asctime)-20s\t%(levelname)s\t%(name)-25s\t%(message)s'
@@ -90,8 +166,12 @@ if __name__ == '__main__':
         os.path.abspath(genome_path), 
         os.path.abspath(options.maf_path), 
         options.reference, 
-        excess_threshold=options.excess_threshold, 
-        min_len=options.min_len
+        excess_threshold=options.excess_threshold,
+        lack_threshold=options.lack_threshold,
+        min_len=options.min_len,
+        muscle_iterations=options.muscle,
+        new_chrom_flush=options.sort_chrom,
+        in_memory=options.in_mem
     )
 
     if not args:
@@ -110,21 +190,16 @@ if __name__ == '__main__':
     handler = { 
         'bed6' : process_bed6,
         'bed12' : not_implemented,
-        'gff' : not_implemented,
+        'gff' : process_gff,
         'ucsc' : process_ucsc,
     }[options.input_format]
     
-    for aln,name in handler(MAF_track, src, system=options.reference, segments=options.segments.split(',')):
-        if options.muscle:
-            mfa = str(aln.MUSCLE(n_iter=options.muscle))
-        else:
-            mfa = str(aln)
-
+    for aln,name in handler(MAF_track, src, system=options.reference, segments=options.segments.split(','), flank=options.flank, sort_chrom=options.sort_chrom):
         if options.output_path == '-' or not options.output_path:
-            print mfa
+            print aln
         else:
             out_file = os.path.join(options.output_path, "{0}.fa".format(name))
             logger.info("storing {name} in {out_file}".format(name=name, out_file=out_file))
-            file(out_file,'w').write(mfa)
+            file(out_file,'w').write(str(aln))
 
     
