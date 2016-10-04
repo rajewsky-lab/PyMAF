@@ -59,17 +59,17 @@ class MAFRecord(object):
     """
     Thin wrapper around each species record in a MAF block.
     """
-    def __init__(self, block, seq, block_attrs = ['chrom','species','start','end']):
-        self.chrom = block['chrom']
-        self.species = block['species']
-        self.start = block['start']
-        self.end = block['end']
+    def __init__(self, species, coords, seq, coords_attrs = ['chrom','species','start','end']):
+        self.chrom = coords['chrom']
+        self.species = species
+        self.start = coords['start']
+        self.end = coords['end']
         
         # would do the same but more cryptic.
-        #for a in block_attrs:
-            #setattr(self,a,block.__getitem__(a))
+        #for a in coords_attrs:
+            #setattr(self,a,coords.__getitem__(a))
             
-        if block['minus']:
+        if coords['minus']:
             self.sense = '-'
         else:
             self.sense = '+'
@@ -83,25 +83,24 @@ class MAFRecord(object):
 class CursorCache(object):
     def __init__(self, group, cls, h5):
         self.group = group
-        self.table_cache = {}
-        self.cursor_cache = {}
+        self.cache = {}
+        self._table_cache = {}
         self.cls = cls
         self.h5 = h5
 
     def __getitem__(self, species):
-        if not species in self.cursor_cache:
+        if not species in self.cache:
             # create new table for self species upon first encounter
             #spc_group = self.h5.create_group(self.group, 'maf', 'MAF records', filters=filters)
             new_tbl = self.h5.create_table(self.group, species, self.cls, "data for species {0}".format(species), expectedrows=1000000)
-            self.table_cache[species] = new_tbl
-            self.cursor_cache[species] = new_tbl.row
+            self._table_cache[species] = new_tbl
+            self.cache[species] = new_tbl#.row
             
-        return self.cursor_cache[species]
+        return self.cache[species]
 
-    def flush_all(self):
-        for t in self.table_cache.values():
+    def flush(self):
+        for t in self._table_cache.values():
             t.flush()
-        
 
 class SpeciesListReconstruct(object):
     def __init__(self):
@@ -140,15 +139,75 @@ class MAFBlockDB(object):
     hand, and higher level on the other.
     """
     
-    def __init__(self, fname=""):
+    def __init__(self, fname="", in_memory=False):
+        self.in_memory = in_memory
+        self.h5 = None
+        self.caches = set()
+
         if fname:
-            self.logger = logging.getLogger("MAFBlockDB({0})".format(fname))
             self.load(fname)
-        else:
-            self.logger = logging.getLogger("MAFBlockDB()")
     
         import multiprocessing
         tbl.set_blosc_max_threads(multiprocessing.cpu_count()) # TODO: figure out why BLOSC is still single threaded?
+
+    def flush(self, species_names = []):
+        self.logger.debug("flushing rows to disk...")
+        t0 = time()
+        
+        if self.caches:
+            self.logger.debug("flushing species caches")
+            for cache in self.caches:
+                # first flush tables that are completely cached and may not even exist in the file, yet
+                cache.flush()
+
+        self.h5.root.scores.flush()
+        self.h5.root.seqs.flush()
+        self.h5.root.species_names.flush()
+
+        if not species_names:
+            species_names = self.species_names
+
+        for species in species_names:
+            t = getattr(self.h5.root.coords, species, None)
+            if t:
+                #self.logger.debug("flushing /coords/{0}".format(species))
+                t.flush()
+            else:
+                self.logger.warning("no coords table for '{0}'".format(species) )
+            
+            t = getattr(self.h5.root.pads, species, None)
+            if t: 
+                #self.logger.debug("flushing /pads/{0}".format(species))
+                t.flush()
+            else:
+                self.logger.warning("no pads table for '{0}'".format(species) )
+                
+        t1 = time()
+        self.logger.debug("flush completed in {0:.1f}ms".format( (t1-t0)*1000.) )
+ 
+ 
+    def build_indices(self, species_names = []):
+        self.flush()
+
+        if not species_names:
+            species_names = self.species_names
+
+        t0 = time()
+        for species in species_names:
+            t = getattr(self.h5.root.coords,species, None)
+            if t:
+                self.logger.debug("creating indices for '{0}'".format(species))
+                cols = t.cols
+                cols.chrom.create_csindex()
+                cols.block_id.create_csindex()
+                cols.start.create_csindex()
+                cols.end.create_csindex()
+            else:
+                self.logger.warning("no coords table for '{0}'".format(species) )
+            
+        t1 = time()
+        self.logger.debug("indexing completed in {0:.1f}ms".format((t1-t0)*1000.) )
+
 
     def create_from_gz(self, path, regular_flushes=10000, blosc_max_threads=8, complevel=0):
         """
@@ -165,24 +224,29 @@ class MAFBlockDB(object):
         
         dirname, basename = os.path.split(path)
         name_parts = basename.split('.')[:-1]
-        h5path = os.path.join(dirname, ".".join( name_parts + ['h5'] ))
+        h5path = os.path.join(dirname, ".".join( name_parts + ['hdf5'] ))
         
+        self.logger = logging.getLogger("MAFBlockDB({0})".format(h5path))
         self.logger.info("creating hdf5 table '{0}' from '{1}'".format(h5path, path) )
+        
         filters = tbl.Filters(complevel=complevel, complib='blosc')
         self.h5 = tbl.open_file(h5path, mode = "w", title = "MAF {0}".format(path), filters=filters)
         
-        score_tbl = self.h5.create_table(self.h5.root, 'scores', MAFBlockScores, "a records for each MAF block")
-        scores = score_tbl.row
-        seqs = self.h5.create_vlarray(self.h5.root, 'seqs', atom = tbl.VLStringAtom(), title = "all sequences in all MAF blocks", filters=filters)
-        n_seqs = 0
+        seqs            = self.h5.create_vlarray(self.h5.root, 'seqs', atom = tbl.VLStringAtom(), title = "all sequences in all MAF blocks", filters=filters)
+        names_table     = self.h5.create_vlarray(self.h5.root, 'species_names', atom = tbl.VLStringAtom(), title = "all species names mentioned in the MAF file")
+        score_tbl       = self.h5.create_table(self.h5.root, 'scores', MAFBlockScores, "a records for each MAF block", filters=filters)
+        species_coords  = self.h5.create_group(self.h5.root, 'coords', 's records for each species', filters=filters)
+        species_pads    = self.h5.create_group(self.h5.root, 'pads', 'i records for each species', filters=filters)
         
-        species_blocks = self.h5.create_group(self.h5.root, 'coords', 's records for each species', filters=filters)
-        species_pads = self.h5.create_group(self.h5.root, 'pads', 'i records for each species', filters=filters)
-        
-        coords_lookup = CursorCache(species_blocks, MAFBlockCoords, self.h5)
+        coords_lookup = CursorCache(species_coords, MAFBlockCoords, self.h5)
         pads_lookup = CursorCache(species_pads, MAFBlockPads, self.h5)
         
+        self.caches = [coords_lookup, pads_lookup]
+        scores = score_tbl.row
+        
         maf_block_id = 0
+        n_seqs = 0
+
         T0 = time()
         T_last = T0
 
@@ -204,17 +268,14 @@ class MAFBlockDB(object):
                 covered_species = []
 
                 if maf_block_id and (maf_block_id % regular_flushes == 0):
-                    score_tbl.flush()
-                    seqs.flush()
-                    coords_lookup.flush_all()
-                    pads_lookup.flush_all()
-                    
+                    self.flush(species_names = coords_lookup.cache.keys() )
+
                     T = time()
                     dT = T - T_last
                     T_last = T
                     kbps = (regular_flushes / 1000.) / dT
                     
-                    self.logger.debug("processed {2} {0:.0f}k MAF blocks ({1:.1f}k blocks per second)".format(maf_block_id/1000., kbps, maf_block_id) )
+                    self.logger.debug("processed {0:.0f}k MAF blocks ({1:.1f}k blocks per second)".format(maf_block_id/1000., kbps) )
                 
             elif maf_line.startswith('s'):
 
@@ -236,19 +297,20 @@ class MAFBlockDB(object):
                 covered_species.append(species)
 
                 coords = coords_lookup[species]
-                coords['block_id'] = maf_block_id
-                coords['chrom'] = chrom
-                coords['start'] = start
-                coords['end'] = end
-                coords['minus'] = (strand == '-')
+                coords.append( [(maf_block_id, chrom, start, end, (strand == '-'), n_seqs)] )
+                                
+                #coords['block_id'] = maf_block_id
+                #coords['chrom'] = chrom
+                #coords['start'] = start
+                #coords['end'] = end
+                #coords['minus'] = (strand == '-')
                 
                 # store the alignment row in the VLStringArray. 
                 # the link is through keeping the n_seqs value
                 seqs.append(seq.encode('ascii'))
-                coords['seq_id'] = n_seqs
-
+                #coords['seq_id'] = n_seqs
                 n_seqs += 1
-                coords.append()
+                #coords.append()
 
             elif maf_line.startswith('i'):
                 parts = re.split(r'\s+',maf_line)
@@ -256,47 +318,44 @@ class MAFBlockDB(object):
                 species,chrom = loc.split('.',1)
                 
                 pads = pads_lookup[species]
-                pads['block_id'] = maf_block_id
-                pads['pre_code'] = pre_code
-                pads['pre_num'] = pre_num
-                pads['post_code'] = post_code
-                pads['post_num'] = post_num
-                pads.append()
+                #pads['block_id'] = maf_block_id
+                #pads['pre_code'] = pre_code
+                #pads['pre_num'] = pre_num
+                #pads['post_code'] = post_code
+                #pads['post_num'] = post_num
+                pads.append( [(maf_block_id, pre_code, pre_num, post_code, post_num)] )
             elif maf_line.startswith('e'):
                 continue # currently ignored
             else:
                 print "ignoring unknown MAF line '{0}'".format(maf_line.strip())
                 
 
-        self.logger.info("done processing MAF blocks.")
-        coords_lookup.flush_all()
-        pads_lookup.flush_all()
+        self.logger.info("done processing {0} MAF blocks in {1:.1f}sec.".format(maf_block_id, (time() - T0)) )
 
         self.species_names = all_species.best_guess()
         self.logger.debug("storing {0} species names ({1})".format(len(self.species_names), ",".join(self.species_names[:100])))
 
-        species_names_table = self.h5.create_vlarray(self.h5.root, 'species_names', atom = tbl.VLStringAtom(), title = "all species names mentioned in the MAF file")
         for s in self.species_names:
-            species_names_table.append(s.encode('ascii'))
+            names_table.append(s.encode('ascii'))
         
-        for species in self.species_names:
-            self.logger.debug("creating indices for {0}".format(species))
-            cols = getattr(self.h5.root.coords,species).cols
-            
-            cols.chrom.create_index()
-            cols.block_id.create_index()
-            cols.start.create_index()
-            cols.end.create_index()
-               
+        self.build_indices()
+        self.caches = []
+
+        
     def load(self, path):
         """
         Open an HDF5 formatted MAF data file.
         :param path: path to mfa.h5 file.
         """
 
-        self.h5 = tbl.open_file(path, 'r')
+        self.logger = logging.getLogger("MAFBlockDB({0})".format(path))
+        if self.in_memory:
+            self.h5 = tbl.open_file(path, 'r',driver="H5FD_CORE")
+        else:
+            self.h5 = tbl.open_file(path, 'r')
+
         self.species_names = self.h5.root.species_names[:]
-        self.logger.info("opened '{0}', with data from {1} species".format(path, len(self.all_species)))        
+        self.logger.info("opened '{0}', with data from {1} species".format(path, len(self.species_names)))
     
     def query_interval(self, ref_species, ref_chrom, ref_start, ref_end, select_species = []):
         """
@@ -305,18 +364,24 @@ class MAFBlockDB(object):
         for each MAF block.
         """
         t0 = time()
-        blocks = self.h5.root.blocks.row
         if not select_species:
             select_species = self.species_names
             
         t = getattr(self.h5.root.coords,ref_species)
+        t3 = t0
+        n_blocks = 0
+        n_rows = 0
         for ref_hit in t.where("(chrom == ref_chrom) & (start < ref_end) & (end > ref_start)"):
+            n_blocks += 1
             rows = []
             ref_id = ref_hit['block_id']
             t1 = time()
+            self.logger.debug("ref_hit found in {0:.1f}ms.".format( (t1-t3)*1000.) )
+
             for species in select_species:
-                for spc_hit in getattr(self.h5.root.coords,species).where("(block_id == ref_id)"):
-                    rows.append( MAFRecord(spc_hit, self.h5.root.seqs[spc_hit['seq_id']]) )
+                for spc_hit in getattr(self.h5.root.coords,species).where("(block_id == {0})".format(ref_id)):
+                    rows.append( MAFRecord(species, spc_hit, self.h5.root.seqs[spc_hit['seq_id']]) )
+                    n_rows += 1
                 
             t2 = time()
             yield rows
@@ -324,5 +389,10 @@ class MAFBlockDB(object):
             
             self.logger.debug("collected rows for block in {0:.1f}ms. process after yield in {1:.2f}ms".format( (t2-t1)*1000., (t3-t2)*1000. ) )
             
-        t3 = time()
-        self.logger.debug("query_interval() took {0:.1f}ms".format( (t3-t0)*1000. ) )
+        t4 = time()
+        elapsed = (t4 - t0)*1000
+        self.logger.debug("query_interval({ref_species} {ref_chrom}:{ref_start}-{ref_end}) found {n_rows} rows in {n_blocks} blocks. Took {elapsed:.1f}ms.".format( **locals() ) )
+
+    def close(self):
+        if self.h5:
+            self.h5.close()
