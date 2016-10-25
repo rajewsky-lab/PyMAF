@@ -1,3 +1,4 @@
+#!/usr/bin/env python
 import os,sys,re
 import byo.gene_model
 from glob import glob
@@ -18,7 +19,8 @@ seed8 = rev_comp(let7[1:9])
 seed6 = rev_comp(let7[1:7])
 
 import PyMAF as pm
-genome_path = "/scratch/data/genomes"
+#genome_path = "/scratch/data/genomes"
+genome_path = "http://localhost:8000"
 maf_path = "/scratch/data/maf/mm10_60way/maf"
 MAF_track = pm.get_track(genome_path, maf_path, 'mm10', new_chrom_flush=True, in_memory=True, muscle_iterations = 8)
 
@@ -29,6 +31,7 @@ def get_seed_alignment(chain, species = []):
         logger.debug('retrieving exon {exon.chrom}:{exon.start}-{exon.end}:{exon.sense} length={l}'.format(exon=exon, l = exon.end - exon.start))
         aln = MAF_track.get_oriented(exon.chrom,exon.start,exon.end,exon.sense, select_species = species)
         alignments.append(aln)
+        print aln
         logger.debug('got {0} columns of alignment of {1} species'.format(aln.n_cols,len(aln.species)))
         
     # concatenate alignments, if more than one exon
@@ -56,7 +59,7 @@ for tx in transcripts_from_UCSC(sys.stdin, system=mm10):
         continue
 
     chain = tx.UTR3
-    #print "looking for seeds"
+    logger.debug("looking for seeds in '{0}'".format(tx.UTR3.name))
     seq = chain.spliced_sequence.upper()
     #print "#",seq
     for M in re.finditer(seed8, seq):
