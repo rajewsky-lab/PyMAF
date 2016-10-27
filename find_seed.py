@@ -22,7 +22,7 @@ import PyMAF as pm
 #genome_path = "/scratch/data/genomes"
 genome_path = "http://localhost:8000"
 maf_path = "/scratch/data/maf/mm10_60way/maf"
-MAF_track = pm.get_track(genome_path, maf_path, 'mm10', new_chrom_flush=True, in_memory=True, muscle_iterations = 8)
+MAF_track = pm.get_track(genome_path, maf_path, 'mm10', new_chrom_flush=True, in_memory=False, muscle_iterations = 8)
 
 print "seeds", seed8, seed6
 def get_seed_alignment(chain, species = []):
@@ -31,7 +31,7 @@ def get_seed_alignment(chain, species = []):
         logger.debug('retrieving exon {exon.chrom}:{exon.start}-{exon.end}:{exon.sense} length={l}'.format(exon=exon, l = exon.end - exon.start))
         aln = MAF_track.get_oriented(exon.chrom,exon.start,exon.end,exon.sense, select_species = species)
         alignments.append(aln)
-        print aln
+        #print aln, type(aln)
         logger.debug('got {0} columns of alignment of {1} species'.format(aln.n_cols,len(aln.species)))
         
     # concatenate alignments, if more than one exon
@@ -40,10 +40,6 @@ def get_seed_alignment(chain, species = []):
         for a in alignments[1:]:
             aln = aln + a
     
-    if not aln.n_cols:
-        logger.error("Received empty Alignment({chain.name} {chain.chrom}:{chain.start}-{chain.end}:{chain.sense}). Region not covered by MAF? Skipping.".format(chain=chain))
-        return None
-
     #aln.headers[0] += " from {chain.exon_count} exons of {chain.name} gene_name={chain.gene_id} n_cols = {aln.n_cols}".format(**locals())
     return aln
 
@@ -67,8 +63,11 @@ for tx in transcripts_from_UCSC(sys.stdin, system=mm10):
         site = chain.cut(start-5, end + 5)
         #print "found seed", site, tx.name, tx.key
         aln = get_seed_alignment(site, species=['mm10','hg19'])
+
+        if not aln:
+            logger.warning("Received empty Alignment({chain.name} {chain.chrom}:{chain.start}-{chain.end}:{chain.sense}). Region not covered by MAF. Skipping.".format(chain=chain))
+            continue
         
-        #print aln
         if not test_seed(aln, seed6, 'hg19'):
             context = chain.cut(start-6, end + 6)
             aln_detail = get_seed_alignment(context, species=[])

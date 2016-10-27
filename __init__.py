@@ -21,33 +21,7 @@ import logging
 
 from PyMAF.maf_hdf5 import MAFBlockDB
 from byo.io.genome_accessor import GenomeCache
-import urllib2
-
-class RemoteCache(object):
-    def __init__(self, urlbase):
-        self.urlbase = urlbase
-        self.logger = logging.getLogger("RemoteCache('{0}')".format(urlbase))
-
-    def __getitem__(self, genome):
-        self.logger.debug('getitem {0}'.format(genome))
-            
-        class Proxy(object):
-            no_data = False
-            def get_oriented(this, chrom, start, end, strand):
-                url = "{base}/{genome}/{chrom}:{start}-{end}{strand}".format(
-                    base = self.urlbase, 
-                    genome=genome, 
-                    chrom=chrom, 
-                    start=start, 
-                    end=end, 
-                    strand=strand
-                )
-                self.logger.debug('requesting "{0}"'.format(url))
-                res = urllib2.urlopen(url)
-                return res.read()
-
-        return Proxy()
-        
+    
 class Alignment(object):
     def __init__(self, mfa, ref=None, acc=None):
         self.logger = logging.getLogger('pymaf.Alignment')
@@ -58,7 +32,6 @@ class Alignment(object):
         self.spacers = []
         self.species_index = {}
         self.acc = acc
-
         for i,(fa_id,seq) in enumerate(fasta_chunks(mfa.split('\n'))):
             self.headers.append(fa_id)
             species = fa_id.split()[0]
@@ -161,7 +134,7 @@ class Alignment(object):
         from subprocess import Popen,PIPE
         # keep correct order for later
         if not self.species:
-            return ""
+            return Alignment("")
         
         # pipe through MUSCLE
         muscle = Popen(['muscle','-quiet','-maxiters',str(n_iter),'-in','/dev/stdin'],stdin=PIPE,stdout=PIPE)
@@ -213,6 +186,12 @@ class Alignment(object):
 
         return new
 
+    def __len__(self):
+        """
+        len(aln) returns aln.n_cols. This makes 'if not aln' work.
+        """
+        return self.n_cols
+    
     def refine_region(self, species, start, end):
         """
         Talks to the upstream MAFBlockMultiGenomeAccessor object to find the blocks within
@@ -419,11 +398,9 @@ class MAFBlockMultiGenomeAccessor(Accessor):
         self.genome_provider = genome_provider
         self.excess_threshold = excess_threshold
         self.lack_threshold = lack_threshold
-        assert lack_threshold < 1.
-        assert excess_threshold > 1.
         self.min_len = min_len
         self.muscle_iterations = muscle_iterations
-        h5path = os.path.join(self.maf_path,chrom+".maf.h5")
+        h5path = os.path.join(self.maf_path,chrom+".maf.hdf5")
         self.maf_file = MAFBlockDB(h5path, in_memory=in_memory)
         
 
@@ -553,6 +530,7 @@ class MAFBlockMultiGenomeAccessor(Accessor):
 
         mfa = "\n".join([">{species} {chrom}:{start}-{end}{strand}\n{seq}".format(**locals()) for species,chrom,start,end,strand,seq in res])
         aln = self.aln_class(mfa, ref=self.reference, acc=self)
+        #print "get_oriented", aln, type(aln)
         if self.muscle_iterations:
             return aln.MUSCLE(n_iter=self.muscle_iterations)
         else:
@@ -564,12 +542,8 @@ class MAFBlockMultiGenomeAccessor(Accessor):
     def flush(self):
         self.maf_file.close()
 
-def get_track(genome_path, maf_path, reference_species, excess_threshold=2, lack_threshold=.0, min_len=1, new_chrom_flush=False, in_memory=False, muscle_iterations = 0):
-    if genome_path.startswith('http://'):
-        genome_provider = RemoteCache(genome_path)
-    else:
-        genome_provider = GenomeCache(genome_path)
-
+def get_track(genome_path, maf_path, reference_species, excess_threshold=2, lack_threshold=2, min_len=1, new_chrom_flush=False, in_memory=False, muscle_iterations = 0):
+    genome_provider = GenomeCache(genome_path)
     MAF_track = Track(
         maf_path,
         MAFBlockMultiGenomeAccessor,

@@ -335,8 +335,8 @@ class MAFBlockDB(object):
             self.logger.debug("ref_hit found in {0:.1f}ms.".format( (t1-t3)*1000.) )
             seq_rows = self.h5.root.seq_rows_vector[vec_row]
             coord_rows = self.h5.root.coord_rows_vector[vec_row]
-            print seq_rows
-            print coord_rows
+            #print seq_rows
+            #print coord_rows
             for species in select_species:
                 i = self.species_index[species]
                 if seq_rows[i] == -1:
