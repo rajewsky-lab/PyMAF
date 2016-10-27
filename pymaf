@@ -163,8 +163,8 @@ if __name__ == '__main__':
         genome_path = options.genome_path
 
     MAF_track = get_track(
-        os.path.abspath(genome_path), 
-        os.path.abspath(options.maf_path), 
+        genome_path, 
+        options.maf_path,
         options.reference, 
         excess_threshold=options.excess_threshold,
         lack_threshold=options.lack_threshold,
