@@ -21,7 +21,32 @@ import logging
 
 from PyMAF.maf_hdf5 import MAFBlockDB
 from byo.io.genome_accessor import GenomeCache
-    
+
+import urllib2
+class RemoteCache(object):
+    def __init__(self, urlbase):
+        self.urlbase = urlbase
+        self.logger = logging.getLogger("RemoteCache({0})".format(urlbase))
+
+    def __getitem__(self, genome):
+        class Proxy(object):
+            def __init__(this, genome):
+                this.genome = genome
+                this.no_data = False
+
+            def get_oriented(this, chrom, start, end, strand):
+                url = "{base}/{genome}/{chrom}:{start}-{end}{strand}".format(base=self.urlbase, genome=this.genome, chrom=chrom, start=start, end=end, strand=strand)
+                self.logger.debug('requesting "{0}"'.format(url))
+                res = urllib2.urlopen(url)
+                if res.getcode() != 200:
+                    self.no_data = True
+                    return "N"*(end-start)
+                else:
+                    self.no_data = False
+                    return res.read()
+
+        return Proxy(genome)
+            
 class Alignment(object):
     def __init__(self, mfa, ref=None, acc=None):
         self.logger = logging.getLogger('pymaf.Alignment')
@@ -398,6 +423,8 @@ class MAFBlockMultiGenomeAccessor(Accessor):
         self.genome_provider = genome_provider
         self.excess_threshold = excess_threshold
         self.lack_threshold = lack_threshold
+        assert lack_threshold < 1.
+        assert excess_threshold > 1.
         self.min_len = min_len
         self.muscle_iterations = muscle_iterations
         h5path = os.path.join(self.maf_path,chrom+".maf.hdf5")
@@ -542,8 +569,12 @@ class MAFBlockMultiGenomeAccessor(Accessor):
     def flush(self):
         self.maf_file.close()
 
-def get_track(genome_path, maf_path, reference_species, excess_threshold=2, lack_threshold=2, min_len=1, new_chrom_flush=False, in_memory=False, muscle_iterations = 0):
-    genome_provider = GenomeCache(genome_path)
+def get_track(genome_path, maf_path, reference_species, excess_threshold=2, lack_threshold=0.1, min_len=1, new_chrom_flush=False, in_memory=False, muscle_iterations = 0):
+    if genome_path.startswith('http://'):
+        genome_provider = RemoteCache(genome_path)
+    else:
+        genome_provider = GenomeCache(genome_path)
+
     MAF_track = Track(
         maf_path,
         MAFBlockMultiGenomeAccessor,

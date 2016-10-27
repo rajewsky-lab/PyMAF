@@ -15,16 +15,18 @@ from byo.io import fasta_chunks
 from byo import rev_comp
 
 let7 = "UGAGGUAGUAGGUUGUAUAGUU".replace('U','T')
-seed8 = rev_comp(let7[1:9])
 seed6 = rev_comp(let7[1:7])
+seed7 = rev_comp(let7[1:8])
+seed8 = rev_comp(let7[1:9])
+
 
 import PyMAF as pm
 #genome_path = "/scratch/data/genomes"
 genome_path = "http://localhost:8000"
 maf_path = "/scratch/data/maf/mm10_60way/maf"
-MAF_track = pm.get_track(genome_path, maf_path, 'mm10', new_chrom_flush=True, in_memory=False, muscle_iterations = 8)
+MAF_track = pm.get_track(genome_path, maf_path, 'mm10', new_chrom_flush=True, in_memory=False, muscle_iterations = 0)
 
-print "seeds", seed8, seed6
+print "seeds", seed8, seed7, seed6
 def get_seed_alignment(chain, species = []):
     alignments = []
     for exon in chain.exons:
@@ -58,25 +60,28 @@ for tx in transcripts_from_UCSC(sys.stdin, system=mm10):
     logger.debug("looking for seeds in '{0}'".format(tx.UTR3.name))
     seq = chain.spliced_sequence.upper()
     #print "#",seq
-    for M in re.finditer(seed8, seq):
+    for M in re.finditer(seed7, seq):
         start, end = chain.map_block_from_spliced(*M.span())
         site = chain.cut(start-5, end + 5)
         #print "found seed", site, tx.name, tx.key
         aln = get_seed_alignment(site, species=['mm10','hg19'])
-
+        #print aln
         if not aln:
             logger.warning("Received empty Alignment({chain.name} {chain.chrom}:{chain.start}-{chain.end}:{chain.sense}). Region not covered by MAF. Skipping.".format(chain=chain))
             continue
         
         if not test_seed(aln, seed6, 'hg19'):
+            #print "# seed absent in human? getting more detail"
             context = chain.cut(start-6, end + 6)
-            aln_detail = get_seed_alignment(context, species=[])
+            aln_detail = get_seed_alignment(context, species=[]).MUSCLE()
             
             present_mask = np.array([test_seed(aln_detail, seed6, spc) for spc in aln_detail.species])
             n_present = present_mask.sum()
             if n_present > 3:
-                print "seed match at {site.key} interesting!".format(site=site)
+                print "seed match in {tx.name} at {site.key} interesting!".format(site=site, tx=chain)
                 print "present in {0} species, but not human!".format(n_present)
                 print aln_detail
                 print present_mask
+        else:
+            print "# seed present in human"
 
