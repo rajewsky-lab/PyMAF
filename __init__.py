@@ -21,32 +21,33 @@ import logging
 
 from PyMAF.maf_hdf5 import MAFBlockDB
 from byo.io.genome_accessor import GenomeCache
-
 import urllib2
+
 class RemoteCache(object):
     def __init__(self, urlbase):
         self.urlbase = urlbase
-        self.logger = logging.getLogger("RemoteCache({0})".format(urlbase))
+        self.logger = logging.getLogger("RemoteCache('{0}')".format(urlbase))
 
     def __getitem__(self, genome):
+        self.logger.debug('getitem {0}'.format(genome))
+            
         class Proxy(object):
-            def __init__(this, genome):
-                this.genome = genome
-                this.no_data = False
-
+            no_data = False
             def get_oriented(this, chrom, start, end, strand):
-                url = "{base}/{genome}/{chrom}:{start}-{end}{strand}".format(base=self.urlbase, genome=this.genome, chrom=chrom, start=start, end=end, strand=strand)
+                url = "{base}/{genome}/{chrom}:{start}-{end}{strand}".format(
+                    base = self.urlbase, 
+                    genome=genome, 
+                    chrom=chrom, 
+                    start=start, 
+                    end=end, 
+                    strand=strand
+                )
                 self.logger.debug('requesting "{0}"'.format(url))
                 res = urllib2.urlopen(url)
-                if res.getcode() != 200:
-                    self.no_data = True
-                    return "N"*(end-start)
-                else:
-                    self.no_data = False
-                    return res.read()
+                return res.read()
 
-        return Proxy(genome)
-            
+        return Proxy()
+        
 class Alignment(object):
     def __init__(self, mfa, ref=None, acc=None):
         self.logger = logging.getLogger('pymaf.Alignment')
@@ -57,6 +58,7 @@ class Alignment(object):
         self.spacers = []
         self.species_index = {}
         self.acc = acc
+
         for i,(fa_id,seq) in enumerate(fasta_chunks(mfa.split('\n'))):
             self.headers.append(fa_id)
             species = fa_id.split()[0]
@@ -159,20 +161,29 @@ class Alignment(object):
         from subprocess import Popen,PIPE
         # keep correct order for later
         if not self.species:
-            return Alignment("")
+            return ""
         
         # pipe through MUSCLE
-        muscle = Popen(['muscle','-quiet','-maxiters',str(n_iter),'-in','/dev/stdin'],stdin=PIPE,stdout=PIPE)
+        muscle = Popen(['muscle','-maxiters',str(n_iter),'-in','/dev/stdin'],stdin=PIPE,stdout=PIPE,stderr=PIPE)
         mfa = "\n".join(['>{spc}\n{seq}'.format(spc=spc, seq=self.nogaps[spc]) for spc in self.species])
         self.logger.info('passing {size:.2f}kb of sequence ({n} species) through MUSCLE (maxiters={maxiters})'.format(n=len(self.species), size=len(mfa)/1000., maxiters=n_iter) )
-        stdout,stderr = muscle.communicate(mfa)
 
-        # sanitize output and re-order
-        unordered = {}
-        for fa_id,seq in fasta_chunks(stdout.split('\n')):
-            unordered[fa_id] = seq
-        
-        return Alignment("\n".join([">%s\n%s" % (species,unordered[species]) for species in self.species]), ref=self.ref, acc=self.acc)
+        stdout,stderr = muscle.communicate(mfa)
+        if muscle.returncode != 0:
+            self.logger.error("MUSCLE died with error {0}. stderr='{1}'".format(muscle.returncode, stderr))
+            import random
+            uniqname = 'breaks_MUSCLE_{0:030x}.fa'.format(random.randrange(16**30))
+            file(uniqname,"w").write(mfa)
+            self.logger.error("saved offending MFA as '{0}'".format(os.path.abspath(uniqname)) )
+            
+            return Alignment("")
+        else:
+            # sanitize output and re-order
+            unordered = {}
+            for fa_id,seq in fasta_chunks(stdout.split('\n')):
+                unordered[fa_id] = seq
+            
+            return Alignment("\n".join([">%s\n%s" % (species,unordered[species]) for species in self.species]), ref=self.ref, acc=self.acc)
         
 
     def __str__(self):
@@ -211,12 +222,6 @@ class Alignment(object):
 
         return new
 
-    def __len__(self):
-        """
-        len(aln) returns aln.n_cols. This makes 'if not aln' work.
-        """
-        return self.n_cols
-    
     def refine_region(self, species, start, end):
         """
         Talks to the upstream MAFBlockMultiGenomeAccessor object to find the blocks within
@@ -557,7 +562,6 @@ class MAFBlockMultiGenomeAccessor(Accessor):
 
         mfa = "\n".join([">{species} {chrom}:{start}-{end}{strand}\n{seq}".format(**locals()) for species,chrom,start,end,strand,seq in res])
         aln = self.aln_class(mfa, ref=self.reference, acc=self)
-        #print "get_oriented", aln, type(aln)
         if self.muscle_iterations:
             return aln.MUSCLE(n_iter=self.muscle_iterations)
         else:
@@ -569,7 +573,7 @@ class MAFBlockMultiGenomeAccessor(Accessor):
     def flush(self):
         self.maf_file.close()
 
-def get_track(genome_path, maf_path, reference_species, excess_threshold=2, lack_threshold=0.1, min_len=1, new_chrom_flush=False, in_memory=False, muscle_iterations = 0):
+def get_track(genome_path, maf_path, reference_species, excess_threshold=2, lack_threshold=.0, min_len=1, new_chrom_flush=False, in_memory=False, muscle_iterations = 0):
     if genome_path.startswith('http://'):
         genome_provider = RemoteCache(genome_path)
     else:
