@@ -52,8 +52,60 @@ def process_gff(MAF_track, src,system=None, flank=0, sort_chrom=False, segments=
 def sort_by_chrom(src):
     from operator import attrgetter
     return sorted(list(src), key=attrgetter('chrom'))
+
+
+def _process_ucsc(tx):
+    """
+    Process one transcript (will run in parallel using multiprocessing.Pool)
+    """
+    if segments == ['full']:
+        chains = [tx]
+    else:
+        chains = [getattr(tx,seg,None) for seg in segments if getattr(tx,seg,None)]
+
+    for chain in chains:
+        if flank:
+            # extend bounds of first+last exon
+            chain.exon_starts[0] -= flank
+            chain.exon_ends[-1] += flank
+            chain._setup()
+            
+        logger.info("...retrieving sequences for {chain.name} {chain.chrom}:{chain.start}-{chain.end}:{chain.sense}".format(chain=chain))
+        
+        alignments = []
+        for exon in chain.exons:
+            logger.debug('retrieving exon {exon.chrom}:{exon.start}-{exon.end}:{exon.sense} length={l}'.format(exon=exon, l = exon.end - exon.start))
+            aln = MAF_track.get_oriented(exon.chrom,exon.start,exon.end,exon.sense)
+            alignments.append(aln)
+            logger.debug('got {0} columns of alignment of {1} species'.format(aln.n_cols,len(aln.species)))
+            
+
+        aln = alignments[0]
+        if len(alignments) > 1:
+            for a in alignments[1:]:
+                aln = aln + a
+        
+        #print aln
+        if not aln.n_cols:
+            logger.error("Received empty Alignment({chain.name} {chain.chrom}:{chain.start}-{chain.end}:{chain.sense}). Region not covered by MAF? Skipping.".format(chain=chain))
+            continue
+
+        aln.headers[0] += " from {chain.exon_count} exons of {chain.name} gene_name={chain.gene_id} n_cols = {aln.n_cols}".format(**locals())
+        return str(aln), chain.name
     
-def process_ucsc(MAF_track, src,system=None, flank=0, sort_chrom=False, segments=["UTR5","CDS","UTR3"],**kwargs):
+
+def mp_init(_segments, _flank, _logger, _MAF_track):
+    """
+    Initialize the environment of multiprocessing.Pool(). Specifically, make local variables global
+    """
+    global segments, flank, logger, MAF_track
+    segments = _segments
+    flank = _flank
+    logger = _logger
+    MAF_track = _MAF_track
+
+
+def process_ucsc(MAF_track, src,system=None, flank=0, sort_chrom=False, segments=["UTR5","CDS","UTR3"], **kwargs):
     from byo.gene_model import transcripts_from_UCSC
     from byo.protein import find_ORF
     logger = logging.getLogger('pymaf.process_ucsc')
@@ -63,42 +115,22 @@ def process_ucsc(MAF_track, src,system=None, flank=0, sort_chrom=False, segments
     else:
         records = transcripts_from_UCSC(src,system=system)
 
-    for tx in records:
+    if options.n_proc > 1:
+        import multiprocessing as mp
+        pool = mp.Pool(options.n_proc, initializer=mp_init, initargs=(segments, flank, logger, MAF_track))
+        
+        for res in pool.imap(_process_ucsc, records):
+            if res:
+                aln, name =  res
+                yield aln, name
+    else:
+        mp_init(segments, flank, logger, MAF_track)
+        for tx in records:
+            res = _process_ucsc(tx)
+            if res:
+                aln, name =  res
+                yield aln, name
 
-        if segments == ['full']:
-            chains = [tx]
-        else:
-            chains = [getattr(tx,seg,None) for seg in segments if getattr(tx,seg,None)]
-
-        for chain in chains:
-            if flank:
-                # extend bounds of first+last exon
-                chain.exon_starts[0] -= flank
-                chain.exon_ends[-1] += flank
-                chain._setup()
-                
-            logger.info("...retrieving sequences for {chain.name} {chain.chrom}:{chain.start}-{chain.end}:{chain.sense}".format(chain=chain))
-            
-            alignments = []
-            for exon in chain.exons:
-                logger.debug('retrieving exon {exon.chrom}:{exon.start}-{exon.end}:{exon.sense} length={l}'.format(exon=exon, l = exon.end - exon.start))
-                aln = MAF_track.get_oriented(exon.chrom,exon.start,exon.end,exon.sense)
-                alignments.append(aln)
-                logger.debug('got {0} columns of alignment of {1} species'.format(aln.n_cols,len(aln.species)))
-                
-
-            aln = alignments[0]
-            if len(alignments) > 1:
-                for a in alignments[1:]:
-                    aln = aln + a
-            
-            #print aln
-            if not aln.n_cols:
-                logger.error("Received empty Alignment({chain.name} {chain.chrom}:{chain.start}-{chain.end}:{chain.sense}). Region not covered by MAF? Skipping.".format(chain=chain))
-                continue
-
-            aln.headers[0] += " from {chain.exon_count} exons of {chain.name} gene_name={chain.gene_id} n_cols = {aln.n_cols}".format(**locals())
-            yield aln, chain.name
 
 
 def process_bed6(MAF_track, src, flank=0, sort_chrom=False, **kwargs):
@@ -141,6 +173,7 @@ if __name__ == '__main__':
 
     parser.add_option("","--segments",dest="segments",default="full",help="which transcript segments (for BED12 or UCSC input) to scan (default=full) set to any comma-separated list of UTR5,CDS,UTR3.")
     parser.add_option("","--muscle",dest="muscle",default=0,type=int,help="activate re-alignment through MUSCLE. Warning, this can take a long time for large sequences! Give number of iterations (default=0, MUSCLE-default=16, lionger values require more time)")
+    parser.add_option("","--processes",dest="n_proc",default=1,type=int,help="number of processes to run in parallel (default=1) WARNING: unless --genome-path is a URL, THIS WILL EAT ALL YOUR RAM!")
     parser.add_option("","--debug",dest="debug",default=False,action="store_true",help="Switch: activate extensive debug output (default=Off)")
     parser.add_option("-i","--input-format",dest="input_format",default="bed6",choices=["bed6","gff","bed12","ucsc"],help='which format does the input have? ["bed6","gff","bed12","ucsc"] default is bed6')
     options,args = parser.parse_args()
@@ -161,7 +194,7 @@ if __name__ == '__main__':
         genome_path = os.path.join(options.maf_path,'genomes')
     else:
         genome_path = options.genome_path
-
+        
     MAF_track = get_track(
         genome_path, 
         options.maf_path,
