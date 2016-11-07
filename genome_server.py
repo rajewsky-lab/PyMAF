@@ -23,6 +23,24 @@ Note: Coordinates are zero-based, half open (as used in C, Python, etc.).
 </body></html>
 """
 
+NOT_FOUND="""
+<html><body>
+<h1>Genome/chromosome not found</h1>
+The requested genome (or chromosome) was not found.
+</body></html>
+"""
+
+LIST="""
+<html><body>
+<h1>{n} available genomes</h1>
+<p>
+<ul>
+{list}
+</ul>
+</p>
+</body></html>
+
+"""
 genome_cache = None
 
 class GenomeRequestHandler(BaseHTTPServer.BaseHTTPRequestHandler):
@@ -33,6 +51,12 @@ class GenomeRequestHandler(BaseHTTPServer.BaseHTTPRequestHandler):
         self.end_headers()
 
     def do_GET(self):
+        if self.path == '/list':
+            self._set_headers(200)
+            l = ["<li>{0}</li>".format(g) for g in genome_cache.available_genomes()]
+            self.wfile.write(LIST.format(n=len(l), list="\n".join(l)))
+            return
+            
         M = re.match(r'/(?P<species>\w+)/(?P<chrom>\S+)\:(?P<start>\d+)\-(?P<end>\d+)(?P<strand>[\+,\-])',self.path)
         if not M:
             self._set_headers(400)
@@ -46,9 +70,15 @@ class GenomeRequestHandler(BaseHTTPServer.BaseHTTPRequestHandler):
             end = int(params['end'])
             strand = params['strand']
 
-            self._set_headers(200)
-            seq = genome_cache[species].get_oriented(chrom, start, end, strand)
-            self.wfile.write(seq)
+            genome = genome_cache[species]
+            seq = genome.get_oriented(chrom, start, end, strand)
+
+            if genome.no_data:
+                self._set_headers(404)
+                self.wfile.write(NOT_FOUND)
+            else:
+                self._set_headers(200)
+                self.wfile.write(seq)
 
     def do_HEAD(self):
         self._set_headers()
