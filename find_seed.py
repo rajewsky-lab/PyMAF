@@ -10,7 +10,7 @@ logging.basicConfig(level=logging.DEBUG,format=FORMAT)
 logger = logging.getLogger('find_seed')
 
 from byo.gene_model import transcripts_from_UCSC
-from byo.systems import hg19, mm10
+from byo import systems
 from byo.io import fasta_chunks
 from byo import rev_comp
 
@@ -23,10 +23,11 @@ seed8 = rev_comp(let7[1:9])
 import PyMAF as pm
 #genome_path = "/scratch/data/genomes"
 genome_path = "http://localhost:8000"
-maf_path = "/scratch/data/maf/mm10_60way/maf"
-MAF_track = pm.get_track(genome_path, maf_path, 'mm10', new_chrom_flush=True, in_memory=False, muscle_iterations = 0)
+maf_path = "/home/mjens/maf/mm10_60way"
+MAF_track = pm.get_track(genome_path, maf_path, 'mm10', new_chrom_flush=True, in_memory=False, muscle_iterations = 0, lack_threshold=.1)
+flank = 20
 
-print "seeds", seed8, seed7, seed6
+#print "# seeds", seed8, seed7, seed6
 def get_seed_alignment(chain, species = []):
     alignments = []
     for exon in chain.exons:
@@ -51,8 +52,10 @@ def test_seed(aln, seed, spc):
             return True
     return False
     
+# do not scan the same region twice
+scanned = set()
 
-for tx in transcripts_from_UCSC(sys.stdin, system=mm10):
+for tx in transcripts_from_UCSC(sys.stdin, system=byo.systems.mm10):
     if not tx.UTR3:
         continue
 
@@ -60,9 +63,14 @@ for tx in transcripts_from_UCSC(sys.stdin, system=mm10):
     logger.debug("looking for seeds in '{0}'".format(tx.UTR3.name))
     seq = chain.spliced_sequence.upper()
     #print "#",seq
-    for M in re.finditer(seed7, seq):
+    for M in re.finditer(seed6, seq):
         start, end = chain.map_block_from_spliced(*M.span())
-        site = chain.cut(start-5, end + 5)
+        site = chain.cut(start-flank, end + flank)
+        if site.key in scanned:
+            continue
+        
+        scanned.add(site.key)
+        
         #print "found seed", site, tx.name, tx.key
         aln = get_seed_alignment(site, species=['mm10','hg19'])
         #print aln
@@ -72,16 +80,20 @@ for tx in transcripts_from_UCSC(sys.stdin, system=mm10):
         
         if not test_seed(aln, seed6, 'hg19'):
             #print "# seed absent in human? getting more detail"
-            context = chain.cut(start-6, end + 6)
+            context = chain.cut(start-flank, end + flank)
             aln_detail = get_seed_alignment(context, species=[]).MUSCLE()
             
-            present_mask = np.array([test_seed(aln_detail, seed6, spc) for spc in aln_detail.species])
-            n_present = present_mask.sum()
+            m6 = np.array([test_seed(aln_detail, seed6, spc) for spc in aln_detail.species])
+            m7 = np.array([test_seed(aln_detail, seed7, spc) for spc in aln_detail.species])
+            m8 = np.array([test_seed(aln_detail, seed8, spc) for spc in aln_detail.species])
+            n_present = m6.sum()
             if n_present > 3:
-                print "seed match in {tx.name} at {site.key} interesting!".format(site=site, tx=chain)
-                print "present in {0} species, but not human!".format(n_present)
+                print ">seed_lost {chain.name} | {site.key_str} | n_present={n_present}".format(**locals())
+                print "m6={0}".format(m6)
+                print "m7={0}".format(m7)
+                print "m8={0}".format(m8)
                 print aln_detail
-                print present_mask
-        else:
-            print "# seed present in human"
+
+        #else:
+            #print "# seed present in human"
 

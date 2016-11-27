@@ -36,9 +36,6 @@ def species_list_from_tree(fname):
 
     return species
 
-#print species_list_from_tree( find_tree('/scratch/data/maf/mm10_60way/maf/chr1.maf.gz') )
-#import sys
-#sys.exit(0)
 
 class MAFCoords(tbl.IsDescription):
     """
