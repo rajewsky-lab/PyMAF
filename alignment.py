@@ -13,6 +13,7 @@ __email__ = "mjens@mit.edu"
 __status__ = "beta"
 
 import logging
+import numpy as np
 from byo.io import fasta_chunks
 
 class Alignment(object):
@@ -138,8 +139,29 @@ class Alignment(object):
         for j in range(start, end):
             col = [seq[j] for seq in aln]
             yield col
+
+
+    def variability(self, start=None, end=None, select_species=[]):
+        """
+        Returns the "fuzziness" of each column on a scale between 0 and 1
+        by scaling the Shannon entropy of A,C,G,T,- frequencies to the 
+        maximum occuring at uniform frequency. H/H_max
+        """
+        from collections import Counter
+        
+        def entropy(seq):
+            """Shannon entropy of 'ACGT-' frequencies"""
+            cnt = Counter(seq)
+            counts = np.array(cnt.values(), dtype=float)
             
-            
+            p = counts / counts.sum()
+            H = - (p * np.log2(p)).sum()
+            return H
+
+        max_H = - np.log2(0.2)
+        return [entropy(c)/max_H for c in self.columns(start, end, select_species)]
+
+        
     def __iter__(self):
         """
         Iterate over alignment rows.
